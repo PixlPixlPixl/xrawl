@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Xrawl perception fixture</title>
+    <meta property="og:type" content="article" />
+    <style>
+      body {
+        margin: 0;
+        padding: 24px;
+        font: 16px/1.6 system-ui, sans-serif;
+        color: #101318;
+        background: #fff;
+      }
+      article,
+      p {
+        max-width: 720px;
+      }
+      .spacer {
+        height: 1600px;
+      }
+      .wrap-word {
+        width: 150px;
+        word-break: break-all;
+        font-size: 20px;
+        border: 1px dashed #bbb;
+      }
+    </style>
+  </head>
+  <body>
+    <article>
+      <h1>Perception fixture for the word discovery engine</h1>
+      <p id="sentence">The quick brown fox jumps over the lazy dog.</p>
+      <p id="resize-paragraph">
+        This paragraph wraps differently when the viewport narrows and contains the word resizeprobe
+        for geometry checks across layout changes.
+      </p>
+      <div class="wrap-word">pneumonoultramicroscopicsilicovolcanoconiosis</div>
+      <pre>codeblockword</pre>
+      <p id="inline-context">Alpha <span>beta <strong>gamma</strong></span> delta.</p>
+    </article>
+
+    <!-- Must not be discovered: CSS-hidden content. -->
+    <div style="display: none">clandestinetoken hidden content</div>
+    <div hidden>stealthtoken hidden content</div>
+    <span style="visibility: hidden">veiledtoken hidden content</span>
+    <div style="opacity: 0">opacityghosttoken hidden content</div>
+
+    <!-- Must not be discovered: editable content. -->
+    <div contenteditable="true">editableprose</div>
+    <textarea>editabletextarea</textarea>
+
+    <!-- Must not be discovered: sensitive form subtree. -->
+    <form>
+      <label>sensitiveformlabel <input type="password" name="password" /></label>
+    </form>
+
+    <!-- Must not be discovered: overlay-owned subtree. -->
+    <div data-xrawl-overlay="leak">overlayleaktoken</div>
+
+    <!-- Must not be discovered: UI chrome / non-text content. -->
+    <button type="button">buttonlabelword</button>
+    <img alt="imagealtword" src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" />
+    <svg><text>svgword</text></svg>
+    <script>
+      var scriptword = 1;
+    </script>
+    <template><p>templateword</p></template>
+
+    <div class="spacer"></div>
+    <p id="footer">footerwordtarget lives below the fold in a second paragraph.</p>
+  </body>
+</html>

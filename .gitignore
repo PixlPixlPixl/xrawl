@@ -1,2 +1,8 @@
 graphify-out/*
 !graphify-out/graph.json
+
+node_modules/
+.wxt/
+.output/
+*.log
+.test-profile/

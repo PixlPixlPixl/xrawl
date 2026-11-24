@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Xrawl</title>
+  </head>
+  <body>
+    <main class="app">
+      <header class="header">
+        <div>
+          <div class="brand">xrawl</div>
+          <div class="tagline">word discovery debugger</div>
+        </div>
+        <button id="toggle" class="toggle" type="button" title="Toggle outlines (Alt+Shift+X)">
+          outlines on
+        </button>
+      </header>
+
+      <section class="page-info">
+        <div class="page-title" id="page-title">—</div>
+        <div class="page-url" id="page-url"></div>
+        <div class="env" id="env"></div>
+      </section>
+
+      <section class="stats" aria-label="Scan statistics">
+        <div class="stat"><span class="value" id="stat-targets">0</span><span class="label">targets</span></div>
+        <div class="stat"><span class="value" id="stat-unique">0</span><span class="label">unique</span></div>
+        <div class="stat"><span class="value" id="stat-visible">0</span><span class="label">in view</span></div>
+        <div class="stat"><span class="value" id="stat-rects">0</span><span class="label">rects</span></div>
+      </section>
+
+      <div class="meta" id="meta">waiting for the first scan…</div>
+
+      <section class="top-words">
+        <h3>Top words</h3>
+        <ul id="top-words"></ul>
+      </section>
+
+      <section class="actions">
+        <button id="rescan" type="button">Rescan</button>
+        <button id="copy" type="button">Copy JSON</button>
+        <button id="download" type="button">Download</button>
+      </section>
+
+      <div class="message" id="message" role="status"></div>
+      <div class="error" id="error" role="alert"></div>
+
+      <footer class="footer">
+        Hover a word in the page for details · outlines are one color per word
+      </footer>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
