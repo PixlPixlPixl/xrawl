@@ -5,8 +5,10 @@
  * translate immediately into document coordinates so a word's geometry is
  * stable while scrolling; the overlay derives viewport rects on demand.
  */
+import { XRAWL_CONFIG } from '@/shared/constants/config';
 import {
   coalesceRects,
+  intersectRects,
   type Rect,
   type ScrollOffset,
 } from '@/shared/types/geometry';
@@ -24,7 +26,7 @@ export class RangeMeasurer {
     this.range = document.createRange();
   }
 
-  measure(node: Text, start: number, end: number, scroll: ScrollOffset): Rect[] {
+  measure(node: Text, start: number, end: number, scroll: ScrollOffset, clip: Rect | null): Rect[] {
     try {
       this.range.setStart(node, start);
       this.range.setEnd(node, end);
@@ -35,16 +37,26 @@ export class RangeMeasurer {
 
     const clientRects = this.range.getClientRects();
     const rects: Rect[] = [];
+    const minSide = XRAWL_CONFIG.scan.minPaintedSidePx;
 
     for (const clientRect of clientRects) {
       if (clientRect.width <= 0 || clientRect.height <= 0) continue;
 
-      rects.push({
+      const rect: Rect = {
         x: clientRect.left + scroll.x,
         y: clientRect.top + scroll.y,
         width: clientRect.width,
         height: clientRect.height,
-      });
+      };
+
+      if (clip !== null) {
+        const clipped = intersectRects(rect, clip);
+        if (clipped === null) continue;
+        if (clipped.width < minSide || clipped.height < minSide) continue;
+        rects.push(clipped);
+      } else if (rect.width >= minSide && rect.height >= minSide) {
+        rects.push(rect);
+      }
     }
 
     return coalesceRects(rects, MAX_RECTS_PER_WORD);

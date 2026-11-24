@@ -249,9 +249,71 @@ async function main() {
       'stealthtoken',
       'veiledtoken',
       'opacityghosttoken',
+      'hiddenvisibilityword',
     ]) {
       assert.equal(byWord(first, word), null, `hidden word "${word}" leaked into targets`);
     }
+  });
+
+  await check('descendants may override inherited visibility', () => {
+    assert.ok(
+      byWord(first, 'visibilityoverrideword'),
+      'visible descendant of a visibility:hidden parent was lost',
+    );
+  });
+
+  await check('display:contents wrappers do not prune descendants', () => {
+    assert.ok(
+      byWord(first, 'contentswrapperword'),
+      'visible descendant of a display:contents wrapper was lost',
+    );
+  });
+
+  await check('visually hidden and clipped text is excluded', () => {
+    for (const word of ['screenreadertoken', 'legacycliptoken', 'clippathtoken']) {
+      assert.equal(byWord(first, word), null, `visually hidden word "${word}" leaked`);
+    }
+  });
+
+  await check('covered text is marked occluded', () => {
+    const quick = byWord(first, 'quick');
+    assert.equal(quick.visibility.occluded, false);
+    const covered = byWord(first, 'occludedbehindcover');
+    assert.ok(covered, 'covered word should still be tracked');
+    assert.equal(
+      covered.visibility.occluded,
+      true,
+      'text behind an opaque cover should be marked occluded',
+    );
+  });
+
+  await check('overflow-clipped text is not outlined', () => {
+    assert.ok(byWord(first, 'clipedgeword'), 'visible clipped-strip word missing');
+    assert.equal(
+      byWord(first, 'clippedawayword'),
+      null,
+      'text outside the overflow clip leaked into targets',
+    );
+  });
+
+  await check('animation-revealed text is rescanned', async () => {
+    const updated = await waitForSnapshot(
+      (snapshot) => byWord(snapshot, 'animfadeword') !== null,
+      10_000,
+    );
+    assert.ok(byWord(updated, 'animfadeword'), 'animated word was not discovered');
+  });
+
+  await check('open shadow roots are scanned', () => {
+    assert.ok(byWord(first, 'shadowrootword'), 'shadow-root text was not discovered');
+  });
+
+  await check('mutations inside shadow roots are observed', async () => {
+    const updated = await waitForSnapshot(
+      (snapshot) => byWord(snapshot, 'shadowdynamicword') !== null,
+      10_000,
+    );
+    assert.ok(byWord(updated, 'shadowdynamicword'), 'shadow mutation was not discovered');
   });
 
   await check('editable and sensitive content is excluded', () => {
@@ -277,7 +339,7 @@ async function main() {
     assert.equal(first.stats.rectCount, sumRectCount(first.targets));
     assert.equal(
       first.stats.visibleInViewport,
-      first.targets.filter((target) => target.visibility.inViewport).length,
+      first.targets.filter((target) => target.visibility.inViewport && !target.visibility.occluded).length,
     );
     assert.ok(first.stats.uniqueWordCount > 0);
     assert.ok(first.stats.topWords.length > 0);
@@ -286,12 +348,48 @@ async function main() {
   await check('debug overlay and HUD are visible', async () => {
     const hud = await page.locator('[data-xrawl-overlay="hud"]').textContent();
     assert.ok(hud, 'HUD missing');
-    assert.match(hud, new RegExp(`${first.stats.targetCount} words`));
+    const current = (await ask({ type: 'xrawl/get-snapshot' })).data.snapshot;
+    assert.match(hud, new RegExp(`${current.stats.targetCount} words`));
     const canvasDisplay = await page.evaluate(() => {
       const canvas = document.querySelector('canvas[data-xrawl-overlay="canvas"]');
       return canvas ? canvas.style.display : null;
     });
     assert.equal(canvasDisplay, 'block');
+  });
+
+  await check('overlay canvas matches the layout viewport', async () => {
+    await sleep(100);
+    const info = await page.evaluate(() => {
+      const canvas = document.querySelector('canvas[data-xrawl-overlay="canvas"]');
+      const root = document.documentElement;
+      const rect = canvas.getBoundingClientRect();
+      return {
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+        height: rect.height,
+        clientWidth: root.clientWidth,
+        clientHeight: root.clientHeight,
+        bitmapWidth: canvas.width,
+        bitmapHeight: canvas.height,
+        dpr: devicePixelRatio,
+      };
+    });
+
+    assert.equal(info.left, 0, 'canvas must start at the viewport origin');
+    assert.equal(info.top, 0, 'canvas must start at the viewport origin');
+    assert.equal(Math.round(info.width), info.clientWidth, 'canvas CSS width must be clientWidth');
+    assert.equal(Math.round(info.height), info.clientHeight, 'canvas CSS height must be clientHeight');
+    assert.equal(
+      info.bitmapWidth,
+      Math.round(info.clientWidth * info.dpr),
+      'backing-store width must match CSS width × DPR',
+    );
+    assert.equal(
+      info.bitmapHeight,
+      Math.round(info.clientHeight * info.dpr),
+      'backing-store height must match CSS height × DPR',
+    );
   });
 
   await check('hovering a word shows its details in the tooltip', async () => {
@@ -320,9 +418,11 @@ async function main() {
   assert.equal(footerBefore.visibility.inViewport, false, 'footer should start below the fold');
 
   await check('scrolling updates viewport visibility without moving document rects', async () => {
-    await page.evaluate(() => window.scrollTo(0, 1800));
-    await sleep(350);
-    const afterScroll = (await ask({ type: 'xrawl/get-snapshot' })).data.snapshot;
+    await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+    const afterScroll = await waitForSnapshot(
+      (snapshot) => byWord(snapshot, 'footerwordtarget')?.visibility.inViewport === true,
+      10_000,
+    );
     const footerAfter = byWord(afterScroll, 'footerwordtarget');
     assert.ok(footerAfter, 'footer word disappeared after scroll');
     assert.equal(footerAfter.visibility.inViewport, true, 'footer should enter the viewport');
@@ -333,7 +433,17 @@ async function main() {
     );
   });
 
+  await check('content-visibility sections are discovered after scrolling into view', async () => {
+    const updated = await waitForSnapshot(
+      (snapshot) => byWord(snapshot, 'cvbelowfoldword') !== null,
+      10_000,
+    );
+    assert.ok(byWord(updated, 'cvbelowfoldword'), 'content-visibility word was not discovered');
+  });
+
   await check('unchanged text is not rescanned while idle', async () => {
+    // Let post-scroll layout validation and content-visibility rendering settle.
+    await sleep(1_200);
     const before = (await ask({ type: 'xrawl/get-stats' })).data.stats;
     await sleep(1_500);
     const after = (await ask({ type: 'xrawl/get-stats' })).data.stats;

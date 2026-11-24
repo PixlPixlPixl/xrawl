@@ -25,6 +25,41 @@
         font-size: 20px;
         border: 1px dashed #bbb;
       }
+      #anim-fade {
+        opacity: 0;
+        animation: xrawl-fade-in 300ms 1400ms forwards;
+      }
+      @keyframes xrawl-fade-in {
+        to {
+          opacity: 1;
+        }
+      }
+      .contents-wrapper {
+        display: contents;
+      }
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+      .legacy-clip {
+        position: absolute;
+        top: 0;
+        left: 0;
+        clip: rect(0, 0, 0, 0);
+      }
+      .clip-path-hidden {
+        position: absolute;
+        top: 0;
+        left: 0;
+        clip-path: inset(50%);
+      }
     </style>
   </head>
   <body>
@@ -45,6 +80,37 @@
     <div hidden>stealthtoken hidden content</div>
     <span style="visibility: hidden">veiledtoken hidden content</span>
     <div style="opacity: 0">opacityghosttoken hidden content</div>
+
+    <!-- Must be discovered: display:contents wrapper has no box itself. -->
+    <div class="contents-wrapper">
+      <p>contentswrapperword is visible through display: contents</p>
+    </div>
+
+    <!-- Must not be discovered: visually hidden / clipped text. -->
+    <span class="sr-only">screenreadertoken hidden</span>
+    <div class="legacy-clip">legacycliptoken hidden</div>
+    <div class="clip-path-hidden">clippathtoken hidden</div>
+
+    <!-- Covered text still has geometry but is not painted. -->
+    <div style="position: relative; max-width: 720px">
+      <p style="margin: 0">occludedbehindcover should be marked occluded</p>
+      <div style="position: absolute; inset: 0; background: #fff"></div>
+    </div>
+
+    <!-- `visibility` is inherited but descendants may override it. -->
+    <div style="visibility: hidden">
+      <p>hiddenvisibilityword must stay excluded</p>
+      <p style="visibility: visible">visibilityoverrideword is visible content</p>
+    </div>
+
+    <!-- Must be clipped: layout boxes extend past the overflow container. -->
+    <div style="width: 140px; overflow: hidden; white-space: nowrap; border: 1px solid #ddd">
+      clipedgeword
+      <span style="display: inline-block; width: 480px; margin-left: 100px">clippedawayword</span>
+    </div>
+
+    <!-- Hidden by opacity, revealed by animation with no DOM mutation. -->
+    <div id="anim-fade">animfadeword is revealed by animation</div>
 
     <!-- Must not be discovered: editable content. -->
     <div contenteditable="true">editableprose</div>
@@ -67,7 +133,26 @@
     </script>
     <template><p>templateword</p></template>
 
+
     <div class="spacer"></div>
     <p id="footer">footerwordtarget lives below the fold in a second paragraph.</p>
+
+    <!-- Open shadow root: static text is scanned, later mutations observed. -->
+    <div id="shadow-host"></div>
+    <script>
+      (() => {
+        const host = document.getElementById('shadow-host');
+        const root = host.attachShadow({ mode: 'open' });
+        root.innerHTML = '<p>shadowrootword lives in an open shadow root</p>';
+        setTimeout(() => {
+          const paragraph = document.createElement('p');
+          paragraph.textContent = 'shadowdynamicword appeared after load';
+          root.append(paragraph);
+        }, 2500);
+      })();
+    </script>
+    <section style="content-visibility: auto; contain-intrinsic-size: 0 140px">
+      <p>cvbelowfoldword becomes measurable after scrolling</p>
+    </section>
   </body>
 </html>

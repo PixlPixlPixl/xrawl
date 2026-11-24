@@ -185,7 +185,7 @@ export class WorldState {
     for (const targets of this.nodeTargets.values()) {
       for (const target of targets) {
         target.visibility = computeVisibility(target.rects, this.viewport);
-        if (target.visibility.inViewport) visible += 1;
+        if (target.visibility.inViewport && !target.visibility.occluded) visible += 1;
       }
     }
     this.visibleInViewport = visible;
@@ -213,7 +213,7 @@ export class WorldState {
     let visibleInViewport = 0;
     for (const target of targets) {
       rectCount += target.rects.length;
-      if (target.visibility.inViewport) visibleInViewport += 1;
+      if (target.visibility.inViewport && !target.visibility.occluded) visibleInViewport += 1;
     }
     this.visibleInViewport = visibleInViewport;
 

@@ -46,6 +46,8 @@ export interface Visibility {
   readonly rendered: boolean;
   readonly inViewport: boolean;
   readonly viewportRatio: number;
+  /** Covered by a later-painted element, so not visible to the user. */
+  readonly occluded: boolean;
 }
 
 export const ORIGIN: ScrollOffset = Object.freeze({ x: 0, y: 0 });
@@ -106,7 +108,7 @@ export function roundRect(rect: Rect, precision = 1): Rect {
 
 export function computeVisibility(rects: readonly Rect[], viewport: Viewport): Visibility {
   if (rects.length === 0) {
-    return { rendered: false, inViewport: false, viewportRatio: 0 };
+    return { rendered: false, inViewport: false, viewportRatio: 0, occluded: false };
   }
 
   const clip = viewportClip(viewport);
@@ -123,6 +125,7 @@ export function computeVisibility(rects: readonly Rect[], viewport: Viewport): V
     rendered: true,
     inViewport: visibleArea > 0,
     viewportRatio: totalArea > 0 ? Math.min(1, visibleArea / totalArea) : 0,
+    occluded: false,
   };
 }
 

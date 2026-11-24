@@ -36,10 +36,13 @@ function createScheduler(win: Window, doc: Document): Scheduler {
 
 function createViewport(win: Window): ViewportPort {
   const scrollOffset = (): ScrollOffset => ({ x: win.scrollX, y: win.scrollY });
-  const size = (): ViewportSize => ({
-    width: win.innerWidth,
-    height: win.innerHeight,
-  });
+  const size = (): ViewportSize => {
+    const root = win.document.documentElement;
+    return {
+      width: root.clientWidth > 0 ? root.clientWidth : win.innerWidth,
+      height: root.clientHeight > 0 ? root.clientHeight : win.innerHeight,
+    };
+  };
 
   return {
     read: () => ({ scroll: scrollOffset(), size: size() }),

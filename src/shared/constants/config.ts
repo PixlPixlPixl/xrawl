@@ -16,6 +16,14 @@ export const XRAWL_CONFIG = {
     resizeDebounceMs: 220,
     /** Debounce for nested scroll containers that need a scoped re-measure. */
     scopedScrollDebounceMs: 100,
+    /**
+     * After scrolling stops, re-scan when content-visibility sections were
+     * skipped earlier. Chrome renders such sections on relevance, which can
+     * happen after layout with no DOM mutation to observe.
+     */
+    scrollRescanDelayMs: 280,
+    /** Deferred extra pass after content-visibility rendering settles. */
+    contentVisibilitySettleMs: 900,
     /** Standard attributes whose changes can affect rendering/visibility. */
     mutationAttributeFilter: [
       'class',
@@ -30,6 +38,8 @@ export const XRAWL_CONFIG = {
     minMutationPassSpacingMs: 400,
     /** A pass never claims more word targets than this (keeps messages sane). */
     maxTargets: 20_000,
+    /** Rects below this side (CSS px) are treated as visually hidden. */
+    minPaintedSidePx: 2,
     /** Segmentation LRU capacity, keyed by raw text-node content. */
     segmentationCacheSize: 8_000,
     /** Context sentence length budget. */

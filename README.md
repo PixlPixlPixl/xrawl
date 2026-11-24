@@ -54,7 +54,7 @@ The snapshot JSON is exactly what later layers consume:
       "text": "Quick",                  // original segment text
       "normalized": "quick",            // NFKC + lowercase + edge punctuation stripped
       "rects": [ { "x": 80, "y": 120, "width": 42.5, "height": 19 } ], // document space
-      "visibility": { "rendered": true, "inViewport": true, "viewportRatio": 1 },
+      "visibility": { "rendered": true, "inViewport": true, "viewportRatio": 1, "occluded": false },
       "context": { "sentence": "The quick brown fox…", "surrounding": "The quick brown fox…" },
       "page": { "url": "...", "title": "..." },
       "environment": "article",
@@ -139,12 +139,13 @@ src/
 │       └── permissions.ts            lazy permission helpers (not wired yet)
 ├── world/
 │   ├── perception/
-│   │   ├── text-discovery.ts         TreeWalker + exclusion rules
+│   │   ├── text-discovery.ts         TreeWalker + shadow roots + exclusions
 │   │   ├── word-segmentation.ts      Intl.Segmenter + LRU cache
-│   │   ├── geometry.ts               Range → document-space rects
-│   │   ├── visibility.ts             CSS visibility with per-pass cache
+│   │   ├── geometry.ts               Range → document-space rects, clip intersection
+│   │   ├── clipping.ts               overflow/contain-paint clip resolver
+│   │   ├── visibility.ts             CSS visibility + opaque-cover detection
 │   │   ├── context.ts                sentence index + block context
-│   │   └── word-scanner.ts           orchestration, mutation/scroll/resize
+│   │   └── word-scanner.ts           orchestration, mutations, layout changes
 │   ├── environment/
 │   │   ├── classifier.ts             heuristic environment classification
 │   │   └── tracker.ts                page identity + classification cache
@@ -171,6 +172,15 @@ origin). This is the stable representation; scrolling does not move a word.
 The debug overlay converts to viewport space (`rect - scroll`) every frame.
 The world model re-derives visibility from cached rects on scroll — no DOM
 reads, no `Range` re-measurement. Resizes and layout changes do re-measure.
+
+A multi-frame measurement pass reads the scroll offset **per node**, just
+before its `Range` geometry; a scroll during the pass cannot mix coordinate
+systems. The viewport is reconciled again before the pass commits.
+
+The overlay canvas is sized to `documentElement.clientWidth/clientHeight`
+(layout viewport, excluding scrollbars), not `innerWidth/innerHeight`, and
+its backing store uses that same CSS width × DPR. Otherwise the scrollbar
+width rescales drawings and every box drifts toward the left edge.
 
 Nested scroll containers cannot be handled by page scroll math, so a captured
 scroll event from an inner element schedules a **scoped** pass rooted at that
@@ -223,7 +233,10 @@ Passes are triggered by:
 3. resize, debounced 220 ms;
 4. SPA URL changes (`navigation` event / `popstate` / 1 s URL poll);
 5. nested scroller scrolls, debounced 100 ms, scoped to the container;
-6. manual rescan from the popup.
+6. resource `load` events, body `ResizeObserver` growth, and font swaps;
+7. `animationend` / `transitionend`; one deferred pass after lazy
+   `content-visibility` layout, plus a post-scroll drift probe;
+8. manual rescan from the popup.
 
 Text is measured in chunks (120 nodes per animation frame) so a large page
 never blocks the main thread. Hidden documents defer passes until visible.
@@ -248,9 +261,13 @@ npm run verify:headless # Linux CI via xvfb-run
 ```
 
 The fixture covers normal paragraphs, hard-wrapped long words, hidden content
-(CSS and `hidden`), editable/sensitive subtrees, overlay-owned text, code
-blocks, SVG/script/template content, inline-split spans, and below-the-fold
-words. The 24 checks cover:
+(CSS and `hidden`), `visibility` overrides, overflow-clipped strips, editable/
+sensitive subtrees, overlay-owned text, code blocks, SVG/script/template
+content, inline-split spans, an animation-revealed paragraph, a lazy
+`content-visibility` section below the fold, a paragraph covered by an opaque
+panel, an `display:contents` wrapper, screen-reader-only/legacy-clip/clip-path
+text, an open shadow root with static and post-load text, and below-the-fold
+words. The 34 checks cover:
 
 - word discovery, original vs normalized text, reading order;
 - multi-rect wrapping and positive finite geometry;
@@ -258,8 +275,15 @@ words. The 24 checks cover:
 - page/title/environment/source metadata;
 - unique ids/fingerprints and every required target field;
 - hidden, editable, sensitive, overlay, and UI-chrome exclusion;
+- visibility overrides inside hidden parents, overflow-clipped text exclusion;
+- `display:contents` wrappers and visible descendants;
+- screen-reader-only, legacy `clip`, and `clip-path: inset()` exclusion;
+- opaque covers marked `visibility.occluded` and skipped by the outline layer;
+- animation-revealed text and lazy `content-visibility` sections after scroll;
+- open shadow-root text and mutations inside shadow roots;
 - stats ↔ target-list consistency;
 - overlay/HUD presence, hover tooltip contents;
+- canvas CSS size, backing store, and origin match the layout viewport;
 - scroll: viewport visibility changes while document rects stay fixed;
 - idle: no passes while nothing changes;
 - resize: re-measure, geometry change, `lastPassKind === "resize"`;
@@ -275,8 +299,14 @@ words. The 24 checks cover:
 | --- | --- |
 | Detects individual words in paragraphs | `paragraph words are discovered…` |
 | Does not include hidden content | `hidden content is excluded` |
+| Includes visible descendants of hidden ancestors | `descendants may override inherited visibility` |
+| Includes descendants of `display:contents` wrappers | `display:contents wrappers do not prune descendants` |
+| Excludes visually hidden/clipped text | `visually hidden and clipped text is excluded` |
+| Does not outline clipped/off-screen layout boxes | `overflow-clipped text is not outlined` |
+| Does not outline covered text | `covered text is marked occluded` |
 | Detects dynamically added text | `dynamically added text is detected` (+ removal) |
 | Coordinates update after scroll and resize | `scrolling updates viewport visibility…`, `resizing re-measures geometry…` |
+| Boxes are not rescaled by scrollbar width | `overlay canvas matches the layout viewport` |
 | Does not scan unchanged text continuously | `unchanged text is not rescanned while idle`, `manual rescan…` |
 | Ignores editable/sensitive fields | `editable and sensitive content is excluded` |
 
@@ -300,15 +330,29 @@ All shapes and guards live in `src/shared/types/messaging.ts`.
 
 ## Known limitations (intentional for this milestone)
 
-- **Top frame only.** `allFrames: false`; iframe targets need per-frame
-  aggregation later.
-- **No shadow DOM traversal.** `TreeWalker` does not enter shadow roots yet.
-- **Overflow clipping** is not subtracted from word rects; a word inside a
-  clipped container is still perceived (its visibility ratio reflects only the
-  viewport). Content clipped to zero size by `display:none` ancestors is pruned.
-- **`visibility: visible` inside a `visibility: hidden` ancestor** is treated
-  as hidden (the subtree is pruned). This is the conservative reading; it can
-  be refined with per-text visibility checks.
+- **Top frame + open shadow roots.** `allFrames: false`; iframe content needs
+  per-frame aggregation later. Open shadow roots are traversed and observed;
+  closed roots are inaccessible by design.
+- **Paint containment / occlusion** is only partially handled. Word rects are
+  clipped to `overflow`/`contain: paint` ancestors, legacy CSS `clip`, and
+  `clip-path: inset()` (plus zero-radius circles/ellipses); rects under 2 CSS px
+  on a side are dropped. Words covered by a
+  solid element are marked `visibility.occluded` and not outlined. Text under
+  semi-transparent overlays remains outlined; full polygon/URL `clip-path`
+  shapes and exotic paint effects are not evaluated. Occlusion is recomputed on the next pass, so with
+  a fixed overlay open, scrolling can leave a few stale occlusion flags until
+  a mutation/animation/resize/pass is triggered.
+- **Document-space rects** are trusted while scrolling on the hot path. A
+  post-scroll probe (12 sampled words) triggers re-measurement if layout drifted
+  without an observed event; if a large panel moves content between those
+  samples, it is corrected on the next pass.
+- **`visibility: visible` inside a `visibility: hidden` ancestor** is
+  supported: hidden elements are traversed and each text node is checked
+  against its parent's resolved `visibility`.
+- **Lazy `content-visibility: auto`** content is re-scanned once after layout
+  settles and again after scrolling stops; content that becomes relevant
+  without any scroll, mutation, animation, or resize can still be missed until
+  the next pass.
 - **Nested scrollers** re-measure only the scrolled element's subtree; multiple
   simultaneously scrolling containers would need one scoped pass each.
 - **Caps:** 20,000 targets per pass; 8,000 targets per exported snapshot

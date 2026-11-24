@@ -12,6 +12,14 @@ const WHITESPACE = /\s+/g;
 const SENTENCE_TERMINATOR = /[.!?\u2026\u3002\uFF01\uFF1F]+(?:["'\u201d\u2019\u00bb)\]]*)\s*/g;
 const NON_BLOCK_DISPLAYS = new Set(['inline', 'contents', 'ruby', 'ruby-text', 'none']);
 
+function composedParent(element: Element): Element | null {
+  if (element.parentElement !== null) return element.parentElement;
+  const root = element.getRootNode();
+  return root.nodeType === Node.DOCUMENT_FRAGMENT_NODE && 'host' in root
+    ? (root as ShadowRoot).host
+    : null;
+}
+
 export function collapseWhitespace(text: string): string {
   return text.replace(WHITESPACE, ' ').trim();
 }
@@ -115,7 +123,7 @@ export class ContextResolver {
 
   private resolveBlock(node: Text): Element | null {
     const visited: Element[] = [];
-    let current = node.parentElement;
+    let current: Element | null = node.parentElement;
     let resolved: Element | null = null;
     let depth = 0;
 
@@ -138,7 +146,7 @@ export class ContextResolver {
       }
 
       visited.push(current);
-      current = current.parentElement;
+      current = composedParent(current);
       depth += 1;
     }
 

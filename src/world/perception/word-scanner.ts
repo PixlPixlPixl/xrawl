@@ -14,11 +14,12 @@
 import { XRAWL_CONFIG } from '@/shared/constants/config';
 import { hashString, stableKey } from '@/shared/id';
 import type { Platform, TimerHandle } from '@/platform/types';
-import { computeVisibility, type Viewport } from '@/shared/types/geometry';
+import { computeVisibility, toViewportRect, type Rect, type Viewport } from '@/shared/types/geometry';
 import type { PassKind, WordContext, WordTarget } from '@/shared/types/word-target';
 import { EMPTY_BASE_STATS } from '@/shared/types/word-target';
 import { EnvironmentTracker } from '@/world/environment/tracker';
 import type { WorldState } from '@/world/world-state';
+import { ClipResolver } from './clipping';
 import { ContextResolver, SentenceIndex, type ContextLimits } from './context';
 import { RangeMeasurer } from './geometry';
 import { iterateTextNodes } from './text-discovery';
@@ -70,6 +71,7 @@ export class WordScanner {
   private readonly segmentation = new SegmentationCache();
   private readonly visibility = new VisibilityCache();
   private readonly measurer: RangeMeasurer;
+  private readonly clips: ClipResolver;
   private readonly contextResolver: ContextResolver;
   private readonly tracker = new EnvironmentTracker();
 
@@ -85,9 +87,15 @@ export class WordScanner {
   private pendingTimer: TimerHandle | null = null;
   private resizeTimer: TimerHandle | null = null;
   private scopedTimer: TimerHandle | null = null;
+  private scrollRescanTimer: TimerHandle | null = null;
+  private scrollValidateTimer: TimerHandle | null = null;
+  private autoSettleTimer: TimerHandle | null = null;
+  private autoSettleUsed = false;
+  private resizePending = false;
   private scopedRoot: Element | null = null;
   private scrollFramePending = false;
   private observer: MutationObserver | null = null;
+  private readonly observedShadowRoots = new WeakSet<ShadowRoot>();
   private cleanups: Array<() => void> = [];
 
   private passCount = 0;
@@ -103,6 +111,7 @@ export class WordScanner {
     this.world = options.world;
     this.win = options.document.defaultView;
     this.measurer = new RangeMeasurer(this.doc);
+    this.clips = new ClipResolver(this.doc);
     this.contextResolver = new ContextResolver(this.doc);
   }
 
@@ -112,10 +121,12 @@ export class WordScanner {
 
     this.started = true;
     this.attachListeners();
+    this.discoverShadowRoots();
     this.requestPass('initial', 0, null);
   }
 
   rescan(): void {
+    this.autoSettleUsed = false;
     this.requestPass('manual', 0, null);
   }
 
@@ -132,6 +143,9 @@ export class WordScanner {
     this.clearTimer('pendingTimer');
     this.clearTimer('resizeTimer');
     this.clearTimer('scopedTimer');
+    this.clearTimer('scrollRescanTimer');
+    this.clearTimer('scrollValidateTimer');
+    this.clearTimer('autoSettleTimer');
 
     this.measurer.dispose();
     this.nodes.clear();
@@ -152,6 +166,17 @@ export class WordScanner {
       this.cleanups.push(() => this.doc.removeEventListener('visibilitychange', onVisibilityChange));
     }
 
+    // Animations can reveal content (or move it) without any DOM mutation.
+    const onPresentationEnd = (event: Event) => {
+      const target = event.target;
+      if (target instanceof Node && this.isOverlayNode(target)) return;
+      this.scheduleLayoutPass();
+    };
+    this.doc.addEventListener('animationend', onPresentationEnd, true);
+    this.doc.addEventListener('transitionend', onPresentationEnd, true);
+    this.cleanups.push(() => this.doc.removeEventListener('animationend', onPresentationEnd, true));
+    this.cleanups.push(() => this.doc.removeEventListener('transitionend', onPresentationEnd, true));
+
     this.observer = new MutationObserver((records) => this.onMutations(records));
     this.observer.observe(this.doc.documentElement, {
       childList: true,
@@ -159,6 +184,32 @@ export class WordScanner {
       characterData: true,
       attributes: true,
       attributeFilter: [...XRAWL_CONFIG.scan.mutationAttributeFilter],
+    });
+    // Images, iframes, and ads can change layout without a DOM mutation.
+    const onResourceLoad = (event: Event) => {
+      const target = event.target;
+      if (target instanceof Node && this.isOverlayNode(target)) return;
+      this.scheduleLayoutPass();
+    };
+    this.doc.addEventListener('load', onResourceLoad, true);
+    this.cleanups.push(() => this.doc.removeEventListener('load', onResourceLoad, true));
+
+    // Document growth/shrink (lazy lists, collapsing panels) moves every
+    // word below it; the first callback is just the initial size.
+    let resizeObserverSeenInitial = false;
+    const resizeObserver = new ResizeObserver(() => {
+      if (!resizeObserverSeenInitial) {
+        resizeObserverSeenInitial = true;
+        return;
+      }
+      this.scheduleLayoutPass();
+    });
+    resizeObserver.observe(this.doc.body);
+    this.cleanups.push(() => resizeObserver.disconnect());
+
+    // Web-font swaps reflow text without touching the DOM.
+    void this.doc.fonts?.ready.then(() => {
+      if (!this.disposed) this.scheduleLayoutPass();
     });
   }
 
@@ -188,6 +239,15 @@ export class WordScanner {
       if (this.disposed) return;
       // Pure geometry: no DOM reads and no text re-measurement.
       this.world.setViewport(this.platform.viewport.read());
+      // content-visibility sections may have become rendered by scrolling;
+      // they need a real pass once scrolling settles.
+      if (
+        this.visibility.contentVisibilitySkipped ||
+        this.visibility.contentVisibilityPresent
+      ) {
+        this.scheduleScrollRescan();
+      }
+      this.scheduleScrollValidation();
     });
   }
 
@@ -209,6 +269,9 @@ export class WordScanner {
 
   private handleResize(): void {
     if (this.disposed) return;
+    // A resize re-measures everything; a pending scroll-only rescan is redundant.
+    this.resizePending = true;
+    this.clearTimer('scrollRescanTimer');
     this.clearTimer('resizeTimer');
     this.resizeTimer = this.platform.scheduler.timeout(() => {
       this.resizeTimer = null;
@@ -250,6 +313,18 @@ export class WordScanner {
 
     // Debounce with adaptive backoff: a live-updating page never gets to
     // monopolise the main thread, and a cheap page is measured promptly.
+    this.scheduleLayoutPass();
+  }
+
+  private scheduleLayoutPass(): void {
+    if (this.disposed) return;
+
+    if (this.doc.visibilityState === 'hidden') {
+      this.deferredForHiddenDoc = true;
+      this.deferredPasses += 1;
+      return;
+    }
+
     const now = this.platform.scheduler.now();
     const spacing = Math.max(
       XRAWL_CONFIG.scan.minMutationPassSpacingMs,
@@ -263,6 +338,90 @@ export class WordScanner {
       this.pendingTimer = null;
       this.requestPass('layout', 0, null);
     }, delay);
+  }
+
+  private scheduleScrollRescan(): void {
+    if (this.disposed || this.doc.visibilityState === 'hidden') return;
+    if (this.resizePending) return;
+
+    this.clearTimer('scrollRescanTimer');
+    this.scrollRescanTimer = this.platform.scheduler.timeout(() => {
+      this.scrollRescanTimer = null;
+      this.requestPass('layout', 0, null);
+    }, XRAWL_CONFIG.scan.scrollRescanDelayMs);
+  }
+
+  /**
+   * Sample a few tracked words after scrolling stops. If any stored
+   * document-space rect no longer matches the DOM, layout shifted without a
+   * signal we observe (lazy panels, inline content growth, etc.), so schedule
+   * a real pass instead of leaving stale outlines on screen.
+   */
+  private scheduleScrollValidation(): void {
+    if (this.disposed || this.doc.visibilityState === 'hidden') return;
+    if (this.resizePending) return;
+
+    this.clearTimer('scrollValidateTimer');
+    this.scrollValidateTimer = this.platform.scheduler.timeout(() => {
+      this.scrollValidateTimer = null;
+      if (this.running) return;
+
+      this.clips.reset();
+      const viewport = this.platform.viewport.read();
+      const tracked = [...this.nodes.values()];
+      if (tracked.length === 0) return;
+
+      const samples = Math.min(12, tracked.length);
+      const stride = Math.max(1, Math.floor(tracked.length / samples));
+      let checked = 0;
+
+      for (let index = 0; index < tracked.length && checked < samples; index += stride) {
+        const node = tracked[index];
+        checked += 1;
+        if (!node.node.isConnected) {
+          this.requestPass('layout', 0, null);
+          return;
+        }
+
+        const target = node.targets[0];
+        if (target === undefined) {
+          if (node.segments.length > 0) {
+            this.requestPass('layout', 0, null);
+            return;
+          }
+          continue;
+        }
+
+        const segment = node.segments[target.source.segmentIndex];
+        if (segment === undefined) continue;
+
+        const rects = this.measurer.measure(
+          node.node,
+          segment.start,
+          segment.end,
+          viewport.scroll,
+          this.clips.clipFor(node.node, viewport.scroll),
+        );
+        const stored = target.rects[0];
+        const current = rects[0];
+
+        if (stored === undefined || current === undefined) {
+          this.requestPass('layout', 0, null);
+          return;
+        }
+
+        const drift = Math.max(
+          Math.abs(stored.x - current.x),
+          Math.abs(stored.y - current.y),
+          Math.abs(stored.width - current.width),
+          Math.abs(stored.height - current.height),
+        );
+        if (drift > 1.5) {
+          this.requestPass('layout', 0, null);
+          return;
+        }
+      }
+    }, XRAWL_CONFIG.scan.scrollRescanDelayMs);
   }
 
   private requestPass(kind: PassKind, delayMs: number, root: Element | null): void {
@@ -304,12 +463,14 @@ export class WordScanner {
 
     this.running = true;
     this.passCount += 1;
+    if (kind === 'resize') this.resizePending = false;
 
     const startedAt = this.platform.scheduler.now();
     const viewport = this.platform.viewport.read();
 
     // A new pass means CSS/layout input may have changed.
     this.visibility.invalidate();
+    this.clips.reset();
     this.contextResolver.reset();
 
     const refresh = this.tracker.refresh(this.doc);
@@ -347,14 +508,19 @@ export class WordScanner {
 
         const tracked = this.track(node);
         seen.add(tracked.id);
+        // A pass can yield across frames; scroll may change while it runs, so
+        // measure each node against its own current scroll offset.
+        const nodeViewport = this.platform.viewport.read();
+        const clip = this.clips.clipFor(node, nodeViewport.scroll);
 
         const measurement = this.measureNode(
           tracked,
           node,
-          viewport,
+          nodeViewport,
           pageKey,
           environmentKind,
           scanOrder,
+          clip,
         );
 
         scanOrder += measurement.targets.length;
@@ -388,7 +554,11 @@ export class WordScanner {
 
       if (!scoped) {
         this.pruneUnseenNodes(seen);
+        this.discoverShadowRoots();
       }
+
+      // Reconcile viewport geometry with the scroll position after the pass.
+      this.world.setViewport(this.platform.viewport.read());
 
       const elapsed = this.platform.scheduler.now() - startedAt;
       this.lastPassDurationMs = elapsed;
@@ -396,6 +566,16 @@ export class WordScanner {
         this.baseStats(kind, startedAt, processedNodes, limited, changed, elapsed),
       );
       this.world.commit();
+      // Lazy content-visibility rendering can complete after this pass with
+      // no mutation or animation to observe. Run one deferred settle pass.
+      if (!scoped && !this.autoSettleUsed && this.visibility.contentVisibilityPresent) {
+        this.autoSettleUsed = true;
+        this.clearTimer('autoSettleTimer');
+        this.autoSettleTimer = this.platform.scheduler.timeout(() => {
+          this.autoSettleTimer = null;
+          this.requestPass('layout', 0, null);
+        }, XRAWL_CONFIG.scan.contentVisibilitySettleMs);
+      }
     } finally {
       iterator.return(undefined);
 
@@ -475,6 +655,7 @@ export class WordScanner {
     pageKey: string,
     environmentKind: WordTarget['environment'],
     scanOrder: number,
+    clip: Rect | null,
   ): Measurement {
     const text = node.data;
     const textChanged = tracked.text !== text;
@@ -489,8 +670,14 @@ export class WordScanner {
 
     for (let index = 0; index < segments.length; index += 1) {
       const segment = segments[index];
-      const rects = this.measurer.measure(node, segment.start, segment.end, viewport.scroll);
+      const rects = this.measurer.measure(node, segment.start, segment.end, viewport.scroll, clip);
       if (rects.length === 0) continue;
+
+      const baseVisibility = computeVisibility(rects, viewport);
+      const visibility =
+        baseVisibility.inViewport && this.isOccluded(node, rects, viewport)
+          ? { ...baseVisibility, occluded: true }
+          : baseVisibility;
 
       const id = `${pageKey}:${tracked.id}:${index}`;
       const context: WordContext = {
@@ -504,7 +691,7 @@ export class WordScanner {
         text: segment.text,
         normalized: segment.normalized,
         rects,
-        visibility: computeVisibility(rects, viewport),
+        visibility,
         context,
         page: this.tracker.currentPage,
         environment: environmentKind,
@@ -532,6 +719,110 @@ export class WordScanner {
     };
   }
 
+  /**
+   * A word whose center point is not covered by its own subtree is hidden
+   * behind a later-painted element (dialog, overlay panel, stacked card), so
+   * outlining it would draw a box over unrelated content.
+   */
+  /**
+   * Shadow roots are invisible to the document-level MutationObserver, so
+   * observe every open root and recurse into nested hosts.
+   */
+  private discoverShadowRoots(): void {
+    const observer = this.observer;
+    if (observer === null) return;
+
+    const observeTree = (root: Document | ShadowRoot): void => {
+      for (const element of root.querySelectorAll('*')) {
+        const shadow = element.shadowRoot;
+        if (shadow === null) continue;
+        if (!this.observedShadowRoots.has(shadow)) {
+          this.observedShadowRoots.add(shadow);
+          observer.observe(shadow, {
+            childList: true,
+            subtree: true,
+            characterData: true,
+            attributes: true,
+            attributeFilter: [...XRAWL_CONFIG.scan.mutationAttributeFilter],
+          });
+        }
+        observeTree(shadow);
+      }
+    };
+
+    observeTree(this.doc);
+  }
+
+  private composedParent(element: Element): Element | null {
+    if (element.parentElement !== null) return element.parentElement;
+    const root = element.getRootNode();
+    return root.nodeType === Node.DOCUMENT_FRAGMENT_NODE && 'host' in root
+      ? (root as ShadowRoot).host
+      : null;
+  }
+
+  private isComposedRelated(top: Element, parent: Element): boolean {
+    if (top === parent || parent.contains(top) || top.contains(parent)) return true;
+
+    let current: Element | null = parent;
+    let depth = 0;
+    while (current !== null && depth < 64) {
+      if (current === top) return true;
+      current = this.composedParent(current);
+      depth += 1;
+    }
+    return false;
+  }
+
+  private isOccluded(node: Text, rects: readonly Rect[], viewport: Viewport): boolean {
+    const parent = node.parentElement;
+    if (!parent) return false;
+    const view = this.doc.defaultView;
+    if (!view) return false;
+    // Text that ignores pointer events (common for image overlays) cannot be
+    // hit-tested reliably; do not hide it based on a false negative.
+    if (view.getComputedStyle(parent).pointerEvents === 'none') return false;
+
+    for (const rect of rects) {
+      const viewportRect = toViewportRect(rect, viewport.scroll);
+      const x = viewportRect.x + viewportRect.width / 2;
+      const y = viewportRect.y + viewportRect.height / 2;
+      if (x < 0 || y < 0 || x >= viewport.size.width || y >= viewport.size.height) continue;
+
+      const stack = this.doc.elementsFromPoint(x, y);
+      const top = stack[0];
+      if (top === undefined) continue;
+      if (this.isComposedRelated(top, parent)) return false;
+      // Semi-transparent backdrops still show the text; only a solid cover
+      // should hide the word.
+      if (this.isOpaqueCover(top)) return true;
+    }
+
+    return false;
+  }
+
+  private isOpaqueCover(element: Element): boolean {
+    const view = this.doc.defaultView;
+    if (!view) return false;
+
+    if (element.tagName === 'IMG' || element.tagName === 'VIDEO' || element.tagName === 'PICTURE') {
+      return true;
+    }
+
+    const style = view.getComputedStyle(element);
+    if (Number(style.opacity) < 0.9) return false;
+    if (style.backgroundImage !== 'none') return true;
+
+    const color = style.backgroundColor;
+    if (color === 'transparent') return false;
+    if (color.startsWith('rgba')) {
+      const alpha = Number(color.split(',')[3]?.replace(')', '').trim());
+      return Number.isFinite(alpha) && alpha >= 0.9;
+    }
+
+    return color.startsWith('rgb');
+  }
+
   private pruneUnseenNodes(seen: ReadonlySet<string>): void {
     for (const [nodeId, tracked] of [...this.nodes]) {
       if (seen.has(nodeId)) continue;
@@ -547,7 +838,15 @@ export class WordScanner {
     return element !== null && element.closest(`[${XRAWL_CONFIG.overlayAttribute}]`) !== null;
   }
 
-  private clearTimer(field: 'pendingTimer' | 'resizeTimer' | 'scopedTimer'): void {
+  private clearTimer(
+    field:
+      | 'pendingTimer'
+      | 'resizeTimer'
+      | 'scopedTimer'
+      | 'scrollRescanTimer'
+      | 'scrollValidateTimer'
+      | 'autoSettleTimer',
+  ): void {
     const handle = this[field];
     if (handle !== null) {
       this.platform.scheduler.clearTimeout(handle);

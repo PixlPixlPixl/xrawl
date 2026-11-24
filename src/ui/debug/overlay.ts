@@ -10,7 +10,13 @@
  */
 import { XRAWL_CONFIG } from '@/shared/constants/config';
 import type { EnvironmentClassification, PageInfo } from '@/shared/types/page';
-import { containsPoint, toViewportRect, type Rect, type ScrollOffset } from '@/shared/types/geometry';
+import {
+  containsPoint,
+  toViewportRect,
+  type Rect,
+  type ScrollOffset,
+  type ViewportSize,
+} from '@/shared/types/geometry';
 import type { ScanStats, WorldSnapshot, WordTarget } from '@/shared/types/word-target';
 import type { SnapshotReason } from '@/world/world-state';
 
@@ -72,11 +78,12 @@ export class DebugOverlay {
 
     const canvas = this.doc.createElement('canvas');
     canvas.setAttribute(ATTRIBUTE, 'canvas');
+    const size = this.layoutViewport();
     canvas.style.cssText = [
       'position:fixed',
       'inset:0',
-      'width:100%',
-      'height:100%',
+      `width:${size.width}px`,
+      `height:${size.height}px`,
       'pointer-events:none',
       `z-index:${Z_INDEX}`,
       'display:none',
@@ -195,12 +202,29 @@ export class DebugOverlay {
     this.scheduleRender();
   }
 
+  /**
+   * The canvas is sized to the layout viewport (client box), not the window
+   * including scrollbars. CSS size and backing-store size must agree or
+   * drawings are horizontally compressed/offset.
+   */
+  private layoutViewport(): ViewportSize {
+    const root = this.doc.documentElement;
+    return {
+      width: root.clientWidth > 0 ? root.clientWidth : this.win.innerWidth,
+      height: root.clientHeight > 0 ? root.clientHeight : this.win.innerHeight,
+    };
+  }
+
   render(): void {
     if (!this.mounted || !this.canvas || !this.context) return;
 
     const dpr = this.win.devicePixelRatio || 1;
-    const width = this.win.innerWidth;
-    const height = this.win.innerHeight;
+    const { width, height } = this.layoutViewport();
+
+    const cssWidth = `${width}px`;
+    const cssHeight = `${height}px`;
+    if (this.canvas.style.width !== cssWidth) this.canvas.style.width = cssWidth;
+    if (this.canvas.style.height !== cssHeight) this.canvas.style.height = cssHeight;
 
     if (this.canvas.width !== Math.round(width * dpr) || this.canvas.height !== Math.round(height * dpr)) {
       this.canvas.width = Math.round(width * dpr);
@@ -220,7 +244,7 @@ export class DebugOverlay {
     const hovered = this.findHoveredTarget();
 
     for (const target of state.targets) {
-      if (!target.visibility.rendered) continue;
+      if (!target.visibility.rendered || target.visibility.occluded) continue;
 
       const isHovered = hovered !== null && hovered.id === target.id;
       const hue = hueFor(target.normalized);
@@ -305,7 +329,7 @@ export class DebugOverlay {
     if (candidates) {
       for (const index of candidates) {
         const target = state.targets[index];
-        if (!target) continue;
+        if (!target || !target.visibility.rendered || target.visibility.occluded) continue;
 
         for (const rect of target.rects) {
           if (!containsPoint(rect, docX, docY)) continue;
@@ -344,8 +368,9 @@ export class DebugOverlay {
     let x = this.pointer.x + offset;
     let y = this.pointer.y + offset;
 
-    if (x + tooltipWidth > this.win.innerWidth - 8) x = this.pointer.x - offset - tooltipWidth;
-    if (y + tooltipHeight > this.win.innerHeight - 8) y = this.pointer.y - offset - tooltipHeight;
+    const { width: viewportWidth, height: viewportHeight } = this.layoutViewport();
+    if (x + tooltipWidth > viewportWidth - 8) x = this.pointer.x - offset - tooltipWidth;
+    if (y + tooltipHeight > viewportHeight - 8) y = this.pointer.y - offset - tooltipHeight;
     if (x < 8) x = 8;
     if (y < 8) y = 8;
 

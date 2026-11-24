@@ -51,39 +51,28 @@ const EXCLUDED_TAGS = new Set([
   'OUTPUT',
   'BUTTON',
   'SLOT',
-  'DIALOG',
 ]);
 
 const SENSITIVE_AUTOCOMPLETE =
   /(current-password|new-password|one-time-code|cc-number|cc-name|cc-exp|cc-csc|cc-type|webauthn|password|pwd)/i;
 
-const SENSITIVE_DESCRIPTOR =
-  /(pass(word|code|phrase)|secret|token|api[-_ ]?key|ssn|social[-_ ]?security|security[-_ ]?code|cvv|cvc|card[-_ ]?number|credit[-_ ]?card|routing[-_ ]?number|iban|account[-_ ]?number|otp|one[-_ ]?time|pin)/i;
-
-function isSensitiveControl(control: Element): boolean {
-  const tag = control.tagName;
-  if (tag === 'INPUT') {
-    const type = (control as HTMLInputElement).type.toLowerCase();
-    if (type === 'password') return true;
+function hasCredentialControl(form: Element): boolean {
+  for (const control of form.querySelectorAll('input, textarea, select')) {
+    if (control.tagName === 'INPUT') {
+      const type = (control as HTMLInputElement).type.toLowerCase();
+      if (type === 'password') return true;
+    }
+    const autocomplete = control.getAttribute('autocomplete') ?? '';
+    if (autocomplete !== '' && SENSITIVE_AUTOCOMPLETE.test(autocomplete)) return true;
   }
-
-  const autocomplete = control.getAttribute('autocomplete') ?? '';
-  if (autocomplete !== '' && SENSITIVE_AUTOCOMPLETE.test(autocomplete)) return true;
-
-  const descriptors = [
-    control.id,
-    control.getAttribute('name') ?? '',
-    control.getAttribute('placeholder') ?? '',
-  ].join(' ');
-  return SENSITIVE_DESCRIPTOR.test(descriptors);
+  return false;
 }
 
 function isSensitiveContainer(element: Element): boolean {
   if (element.tagName === 'FORM') {
-    for (const control of element.querySelectorAll('input, textarea, select')) {
-      if (isSensitiveControl(control)) return true;
-    }
-    return false;
+    // Descriptor matches (e.g. a hidden CSRF `token` input) must not hide the
+    // whole form; only a real credential/payment control warrants that.
+    return hasCredentialControl(element);
   }
 
   const autocomplete = element.getAttribute('autocomplete');
@@ -127,7 +116,10 @@ export function* iterateTextNodes(
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
     acceptNode(node: Node): number {
       if (node.nodeType === Node.TEXT_NODE) {
-        return isCandidateText(node as Text) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+        const text = node as Text;
+        return isCandidateText(text) && visibility.textIsVisible(text)
+          ? NodeFilter.FILTER_ACCEPT
+          : NodeFilter.FILTER_REJECT;
       }
       if (node.nodeType === Node.ELEMENT_NODE) {
         return elementIsExcluded(node as Element, document, visibility)
@@ -139,6 +131,12 @@ export function* iterateTextNodes(
   });
 
   for (let current = walker.nextNode(); current !== null; current = walker.nextNode()) {
-    if (current.nodeType === Node.TEXT_NODE) yield current as Text;
+    if (current.nodeType === Node.TEXT_NODE) {
+      yield current as Text;
+      continue;
+    }
+
+    const shadow = (current as Element).shadowRoot;
+    if (shadow !== null) yield* iterateTextNodes(document, shadow, visibility);
   }
 }
