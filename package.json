@@ -13,11 +13,18 @@
     "compile": "tsc --noEmit",
     "verify": "npm run build && node test/verify.mjs",
     "verify:headless": "npm run build && xvfb-run -a node test/verify.mjs",
-    "postinstall": "wxt prepare"
+    "postinstall": "wxt prepare",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "devDependencies": {
+    "fake-indexeddb": "^6.2.8",
     "playwright-core": "^1.65.1",
     "typescript": "^5.7.3",
+    "vitest": "^5.1.1",
     "wxt": "^0.20.6"
+  },
+  "dependencies": {
+    "dexie": "^4.4.7"
   }
 }

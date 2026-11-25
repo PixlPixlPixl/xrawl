@@ -21,6 +21,10 @@ import { WordScanner } from '@/world/perception/word-scanner';
 import { createBrowserPlatform } from '@/platform/browser/browser-adapter';
 import { onRuntimeMessage } from '@/platform/browser/messaging';
 import { observeUrlChanges } from '@/platform/browser/navigation';
+import { ObservationReporter } from './observation-reporter';
+import { CreatureSession } from './creature-session';
+import type { FeedingPayload } from '@/data/observation';
+import type { CreatureLoadoutSnapshot } from '@/shared/types/creature';
 
 function buildStatus(snapshot: WorldSnapshot, overlayVisible: boolean): StatusPayload {
   return {
@@ -70,6 +74,35 @@ export function startContentSession(): void {
   const overlay = new DebugOverlay(document, window);
   overlay.mount();
 
+  // Measurements go to the background, which owns the database. Nothing here
+  // ever opens IndexedDB — the content script shares the page's origin.
+  const reporter = new ObservationReporter({
+    send: (payload) => {
+      try {
+        void browser.runtime.sendMessage({ type: 'xrawl/observe', payload }).catch(() => undefined);
+      } catch {
+        // Background worker unavailable during startup/shutdown.
+      }
+    },
+    isVisible: () => document.visibilityState !== 'hidden',
+  });
+
+  const sendFeeding = (payload: FeedingPayload): void => {
+    try {
+      void browser.runtime.sendMessage({ type: 'xrawl/feed', payload }).catch(() => undefined);
+    } catch {
+      // Background worker unavailable during startup/shutdown.
+    }
+  };
+
+  const creature = new CreatureSession({
+    document,
+    window,
+    platform,
+    sessionId: reporter.sessionId,
+    sendFeeding,
+  });
+
   let statsPushTimer: number | null = null;
   let pendingSnapshot: WorldSnapshot | null = null;
   let lastPushAt = 0;
@@ -103,7 +136,13 @@ export function startContentSession(): void {
     overlay.syncSnapshot(snapshot, reason);
     // Throttled; scroll updates carry refreshed visibility counts.
     scheduleStatsPush(snapshot);
+    // Persistence is coarser than the UI: the reporter decides when to flush.
+    reporter.observe(snapshot);
+    // The creature consumes the same snapshot; it never reads the DOM itself.
+    creature.syncSnapshot(snapshot);
   });
+
+  window.addEventListener('pagehide', () => reporter.stop());
 
   const toggleOverlay = (visible: boolean): void => {
     overlay.setVisible(visible);
@@ -168,7 +207,24 @@ export function startContentSession(): void {
       true,
     );
     overlay.setVisible(enabled);
+    const creatureEnabled = await platform.storage.get<boolean>(
+      XRAWL_CONFIG.creatureEnabledStorageKey,
+      true,
+    );
+    creature.mount();
+    creature.setVisible(creatureEnabled);
     scanner.start();
+
+    // The background owns the database, so the live loadout (species genes +
+    // purchased levels) is fetched rather than read locally. Failure is
+    // non-fatal: the creature falls back to its species defaults.
+    void browser.runtime
+      .sendMessage({ type: 'xrawl/creature-loadout' })
+      .then((response: unknown) => {
+        const loadout = response as { ok?: boolean; data?: CreatureLoadoutSnapshot | null } | null;
+        if (loadout?.ok && loadout.data) creature.applyLoadout(loadout.data);
+      })
+      .catch(() => undefined);
     observeUrlChanges(window, () => scanner.rescan());
     pushStatsNow(world.getSnapshot());
   })();

@@ -5,9 +5,10 @@ but the game engine, world model, and persistence contracts are deliberately
 kept independent of browser APIs so the same simulation can later run inside a
 desktop host.
 
-This repository currently implements **milestone 1: the word-discovery
-debugger**. There is intentionally no creature, movement, or progression code
-yet — everything else depends on reliable word perception.
+This repository implements **milestone 1: the word-discovery debugger**, plus
+**the persistence foundation** the game will build on. There is intentionally no
+creature movement or progression logic yet — the schema, migrations, and
+repositories exist so those layers have somewhere durable to land.
 
 ## Quick start
 
@@ -102,7 +103,7 @@ browser globals; only the platform layer does.
                             ▼                           ▼
                     ┌──────────────┐            ┌──────────────┐
                     │ creature     │            │ persistence  │
-                    │ (future)     │            │ (future)     │
+                    │ (future)     │            │ (implemented)│
                     └──────────────┘            └──────────────┘
                             │
                             ▼
@@ -113,12 +114,12 @@ browser globals; only the platform layer does.
 
 | System | Allowed to know about | Must not depend on |
 | --- | --- | --- |
-| Creature simulation (future) | creature state, targets, physics | DOM, WXT, IndexedDB |
-| Rendering (future) | creature state, vector parameters | browser storage, progression rules |
+| Creature simulation (implemented) | genetics, attributes, targets, gait | DOM, WXT, IndexedDB |
+| Rendering (implemented) | a pose of plain points, appearance colours | browser storage, progression rules, action decisions |
 | Perception (implemented) | DOM and word geometry | creature behaviour |
 | Progression (future) | feeding events, rarity, upgrades | DOM, rendering |
 | Cognition (future) | context, embeddings, preferences | browser APIs |
-| Persistence (future) | data models and repositories | creature rendering |
+| Persistence (implemented) | data models, repositories, migrations | creature rendering, DOM |
 
 ### Current file map
 
@@ -129,14 +130,42 @@ src/
 │   ├── content.ts                    injects the debug harness
 │   └── popup/                        HTML + CSS + popup UI
 ├── app/
-│   └── content-session.ts            composition root (platform + world + ui)
+│   ├── content-session.ts            composition root (platform + world + ui)
+│   ├── observation-reporter.ts       browse-time / word deltas sent to the background
+│   └── creature-session.ts           frame loop: snapshot -> engine -> SVG + feed
+├── creature/                         simulation: no DOM, no Dexie, no platform
+│   ├── species.ts                    gene sets -> appearance + attributes
+│   ├── loadout.ts                    genetics + purchases -> live loadout
+│   ├── brain.ts                      action state machine + speed budgets
+│   ├── targets.ts                    eligible words -> forage points
+│   ├── engine.ts                     the tick: controllers + pose + events
+│   ├── movement/
+│   │   ├── movement-controller.ts    where the body goes, how it faces
+│   │   └── gait-controller.ts        when feet lift, where they land
+│   ├── rig/
+│   │   ├── fabrik.ts                 IK solver over plain points
+│   │   ├── rig.ts                    appearance -> limb chains
+│   │   └── pose.ts                   per-frame geometry (controllers meet)
+│   └── render/svg-renderer.ts        draws a pose; decides nothing
+├── data/                             persistence: no DOM, no rendering, no UI
+│   ├── schema.ts                     row types + index declarations
+│   ├── migrations.ts                 append-only version history
+│   ├── db.ts                         Dexie instance, version + downgrade guards
+│   ├── repositories/                 one module per table; only code that reads/writes tables
+│   ├── ingest.ts                     observation/feeding write path (clamping, transactions)
+│   ├── export.ts                     whole-database export/import
+│   ├── export-format.ts              export envelope type + guard
+│   ├── observation.ts                payload contracts + hard limits
+│   ├── resilience.ts                 persist()/storage-estimate probes
+│   └── service.ts                    background-owned database service (lazy open)
 ├── platform/
 │   ├── types.ts                      Platform ports (scheduler, viewport, storage)
 │   └── browser/
 │       ├── browser-adapter.ts        the only browser API implementation of ports
 │       ├── messaging.ts              typed runtime/tab message helpers
 │       ├── navigation.ts             SPA URL change detection
-│       └── permissions.ts            lazy permission helpers (not wired yet)
+│       ├── permissions.ts            lazy permission helpers (not wired yet)
+│       └── resilience.ts             eviction-aid marker in extension storage
 ├── world/
 │   ├── perception/
 │   │   ├── text-discovery.ts         TreeWalker + shadow roots + exclusions
@@ -154,8 +183,8 @@ src/
 ├── shared/
 │   ├── constants/config.ts           tuning surface
 │   ├── id.ts                         stable hashing
-│   └── types/                        geometry, page, word-target, messaging
-└── (planned) creature/, progression/, cognition/, data/
+│   └── types/                        geometry, page, word-target, creature, messaging
+└── (planned) progression/, cognition/
 ```
 
 Planned layers are not stubbed out: empty interfaces would be debt. Their
@@ -260,6 +289,17 @@ npm run verify          # desktop (needs a display)
 npm run verify:headless # Linux CI via xvfb-run
 ```
 
+It drives the persistence channel through the popup (the only context whose
+`runtime.sendMessage` reaches the background listener): it waits for observation
+flushes to reach the database, asserts a known fixture word persisted, exports
+and re-imports the world, and checks that invalid and newer-schema envelopes are
+rejected without touching live data.
+
+The creature section inspects the live SVG: eight articulated limb paths whose
+bone lengths match the rig, a body that moves and re-orients over time, an
+alternating gait where some feet are airborne and others planted (never all
+airborne at once), and a jaw that only animates in the eating state.
+
 The fixture covers normal paragraphs, hard-wrapped long words, hidden content
 (CSS and `hidden`), `visibility` overrides, overflow-clipped strips, editable/
 sensitive subtrees, overlay-owned text, code blocks, SVG/script/template
@@ -325,8 +365,171 @@ DevTools to add/remove a paragraph; hover words to inspect targets.
 | popup → content | `xrawl/rescan` | force a manual pass |
 | popup → content | `xrawl/set-overlay` | toggle outlines (persisted) |
 | popup → content | `xrawl/download-snapshot` | JSON file download initiated in-page |
+| content → background | `xrawl/observe` | browse-time + word deltas for the database |
+| content → background | `xrawl/feed` | one feeding event (append-only) |
+| content → background | `xrawl/creature-loadout` | resolved genetics + purchase levels |
+| popup → background | `xrawl/db-status` | schema version, word/feeding counts, storage estimate |
+| popup → background | `xrawl/db-export` | whole-database JSON envelope |
+| popup → background | `xrawl/db-import` | replace tables from an export envelope |
 
-All shapes and guards live in `src/shared/types/messaging.ts`.
+All shapes and guards live in `src/shared/types/messaging.ts`. Persistence
+messages are validated there before the background touches the database; the
+write path then clamps and sanitizes them again in `src/data/ingest.ts`.
+
+## Persistence
+
+The game database is **Dexie over IndexedDB**, owned exclusively by the
+background worker. Content scripts never open it: Chrome content scripts share
+the host page's origin for web storage, so writing there would put the world
+inside the page's namespace. The content script measures and sends
+`xrawl/observe` deltas; the background writes through repositories.
+
+```text
+content script ──xrawl/observe──▶ background ──▶ DatabaseService ──▶ repositories ──▶ Dexie/IndexedDB
+                ──xrawl/feed────▶             (lazy open, single instance)
+```
+
+### Tables (v1)
+
+| Table | Key | Purpose |
+| --- | --- | --- |
+| `creatures` | `id` | Core state; `attributes` and `appearance.traits` are open namespaces |
+| `vocabulary` | `word` | Per-word seen/eaten counters and first/last timestamps |
+| `feedingEvents` | `id` | Immutable log; one row per individual eating event |
+| `environments` | `kind:host` | Accumulated exposure, visits, word volume |
+| `sessions` | `id` | Visible browse time, page visits, feedings |
+| `upgrades` | `id` | Purchased upgrades with level and spend |
+| `personality` | `kind:key` | Learned interests/traits as bounded values with confidence |
+| `embeddings` | derived | Vectors keyed by model **and** dimensions |
+| `meta` | `key` | Schema bookkeeping, not game data |
+
+Design notes that matter later:
+
+- **Feeding is append-only.** `feedingEvents` is the source of truth; vocabulary
+  counters are a denormalized cache that can be rebuilt from the log.
+- **Timestamps use `0`, never `null`.** IndexedDB does not index `null`, so
+  `endedAt: 0` keeps "open sessions" queryable.
+- **Embeddings are keyed by model + dimension + source hash.** Swapping models
+  writes new rows and leaves the old ones intact for comparison or pruning.
+- **Compound indexes** (`[creatureId+eatenAt]`, `[word+eatenAt]`,
+  `[model+subjectType+subjectId]`, `[kind+updatedAt]`) cover the queries
+  progression and cognition will actually run.
+
+### Migration rules
+
+1. `src/data/migrations.ts` is the history. It is append-only: shipped entries
+   are never edited, corrections go in a new entry.
+2. Each entry holds the complete store map at that version plus its upgrader.
+3. `meta.schemaVersion` is written after every successful open, so an
+   interrupted upgrade is visible.
+4. Opening a store written by a **newer** build is refused, not silently
+   written to. The same rule guards imports.
+5. Tests build a *populated* old-version database and upgrade it — see
+   `test/migrations.test.ts`. Creating an empty database proves nothing.
+
+### Export and import
+
+The popup's **Memory** panel exports the whole world as one JSON envelope
+(`format`, `formatVersion`, `schemaVersion`, counts, tables) and imports it back.
+Import validates the envelope before opening a transaction, then clears and
+rewrites every table in it **inside one transaction** — a bad file cannot leave
+half a world behind. Embedding rows are excluded from exports by default
+because they are a cache; the vectors can be regenerated.
+
+### Storage resilience
+
+IndexedDB survives extension updates but not eviction or uninstall:
+
+- `unlimitedStorage` is declared, and `navigator.storage.persist()` is requested
+  on first open (`src/data/resilience.ts`).
+- A creation marker is kept in `browser.storage.local`, which survives a wiped
+  database, so the UI can tell "new install" from "history lost".
+- Export/import is the real backstop: it is the only thing that survives
+  extension removal.
+
+`browser.storage.local` remains reserved for lightweight settings (the overlay
+toggle); game history belongs in the database.
+
+## Creature
+
+The creature is a **parameterized vector rig**, not a hand-drawn animal with
+hardcoded upgrade patches. One pipeline builds every species:
+
+```text
+genetics ──▶ appearance ──▶ rig ──▶ pose ──▶ SVG
+         └─▶ attributes ──┐
+upgrades ─────────────────┴─▶ attributes
+```
+
+`src/creature/` is a pure simulation: no DOM, no Dexie, no `@/platform`. A
+desktop host can run it unchanged, and `test/architecture.test.ts` fails if that
+stops being true.
+
+### Appearance vs attributes
+
+Two separate projections, never merged:
+
+| Concept | What it is | What rewrites it |
+| --- | --- | --- |
+| **Genetics / species** | body size, limb count, bone lengths, hue, innate aptitude | evolution |
+| **Appearance** | the derived drawable construction (`CreatureAppearance`) | recomputed from genetics |
+| **Attributes** | gameplay capabilities (`CreatureAttributes`) | purchases |
+| **State** | live values (satiety, stomach) | the simulation |
+| **Personality** | learned tendencies (stored separately) | cognition |
+
+A purchase therefore cannot change the body, and an evolution cannot silently
+double a stat. Neither appearance nor attributes is *stored*: the creature row
+holds genetics + live state, and both projections are recomputed at load (`src/creature/loadout.ts`).
+
+Species are just default gene sets: `spider` (8 legs, 3 bones each) and `mite`
+(6 legs, 2 bones). Adding a species is one entry in `src/creature/species.ts`.
+
+### The three animation components
+
+| Component | File | Responsibility |
+| --- | --- | --- |
+| Movement controller | `movement/movement-controller.ts` | where the body is; rate-limited turning; speed throttled by facing so it cannot orbit a target |
+| Gait controller | `movement/gait-controller.ts` | when each foot lifts, where it lands, when it plants; alternating groups; planted feet drag with the body |
+| FABRIK solver | `rig/fabrik.ts` | how articulated limbs bend, preserving bone lengths |
+
+`rig/pose.ts` is where they meet: it seeds each chain, solves it, and emits a
+`CreaturePose` of plain points. The renderer (`render/svg-renderer.ts`) draws
+that pose and decides nothing.
+
+Two solver details worth knowing:
+
+- **The seed is curved, not straight.** A perfectly straight chain is an unstable
+  fixed point — forward and backward passes cancel and the limb stalls. Seeding
+  with a gentle bend gives FABRIK a moment arm.
+- **The foot is never force-assigned after solving**, because that would change
+  the last bone's length. Convergence is the guarantee; residue is bounded by
+  the tolerance.
+
+### Behaviours are states, not branches
+
+```text
+idle ──word in range──▶ approaching ──within reach──▶ eating ──done──▶ following
+  ▲                          ▲                                          │
+  │                          └──────────── word in range ────────────────┘
+  ├──quiet──▶ resting ──very close word──▶ approaching
+  └──quiet──▶ foraging ──word in range──▶ approaching ◀──────────────────┘
+```
+
+Transitions live in `brain.ts` as a pure function of the current action plus a
+small context; the renderer never checks state. Eating is its own state with its
+own jaw animation and a zero speed budget — it is not an extension of walking.
+Rest is about digestion (the stomach decays only while resting), which is what
+prevents an eat/rest/approach loop several times a second.
+
+An eaten word is remembered by `fingerprint` for a cooldown, because page text
+cannot be removed and the creature would otherwise re-eat it forever.
+
+### Wiring
+
+`src/app/creature-session.ts` owns the frame loop and is deliberately thin:
+snapshot in → engine step → pose out → SVG, plus one `xrawl/feed` message per
+bite. It never touches the database; the background supplies the live loadout
+over `xrawl/creature-loadout`.
 
 ## Known limitations (intentional for this milestone)
 
@@ -361,22 +564,43 @@ All shapes and guards live in `src/shared/types/messaging.ts`.
   letter/number regex (no dictionary-based CJK/Thai segmentation).
 - **Environment classification** is heuristic (URL/title/meta/small DOM probes)
   and deliberately low-confidence on unfamiliar sites.
+- **Persistence caps.** One observation flush carries at most 2,000 words, and
+  the background clamps per-flush browse time to one hour. A page whose first
+  snapshot arrives before perception measured anything retries its word counts on
+  the next snapshot; nothing is lost, only delayed.
+- **Import replaces, it does not merge.** Importing a world overwrites the
+  tables present in the file. Export first if the current world matters.
+- **Vectors are a cache.** Exports exclude `embeddings` by default; they can be
+  regenerated from source text, and rows record the model and dimensions they
+  were produced with.
+- **The creature never opens IndexedDB.** It receives a resolved loadout over
+  messaging. Genetics and purchases change on the background's side; the
+  content script only derives and draws.
+- **A page's words are finite.** Eaten words are suppressed for a cooldown rather
+  than deleted, so a long-lived page eventually runs out of food and the
+  creature rests. Reloading or scrolling to new text supplies more.
+- **Gait is a tetrapod approximation.** Feet alternate by band parity rather
+  than true per-leg phase offsets, and planted feet drag until the step
+  threshold. It reads correctly for 6-8 limbs; more exotic gaits would need
+  per-limb phase tables.
 
 ## Next steps
 
-1. **Persistence contracts** (`data/`): vocabulary, page/word targets,
-   feeding history, creature state, migrations. Both perception and creature
-   should talk to repositories through interfaces, not to IndexedDB directly.
-2. **Feeding loop**: creature selects a `WordTarget`, resolves a durable word
-   id via `fingerprint`, and records interest/preference deltas.
-3. **Creature engine** (`creature/`): pure simulation reading plain targets and
-   the platform scheduler; no DOM/WXT/IndexedDB imports.
-4. **Desktop host**: implement `platform/types.ts` ports over Electron/Tauri and
-   feed world perception from a host extraction pipeline; the engine code is
-   unchanged.
-5. **Personality**: model it as accumulated experiences and preference
-   history (deterministic, inspectable), not weights an embedding model
-   retrains.
+1. **Progression** (`progression/`): derive levels, unlock costs, and upgrade
+   availability from `feedingEvents` + `vocabulary` + `upgrades`. Purchases
+   already flow to the creature as attribute multipliers.
+2. **Evolution**: rewrite `genetics` from accumulated evidence. Appearance and
+   attributes are derived, so an evolution needs no migration and cannot
+   contradict its own body.
+3. **Cognition**: fill `embeddings` and `personality` using the stored model
+   identifier and dimensionality checks, and let learned preferences bias
+   target choice.
+4. **Cognition**: fill `embeddings` and `personality` using the stored model
+   identifier and dimensionality checks. Personality updates online from
+   accumulated evidence — deterministic and inspectable, not retrained weights.
+5. **Desktop host**: implement `platform/types.ts` ports over Electron/Tauri
+   and feed world perception from a host extraction pipeline; the engine and
+   data layers are unchanged.
 
 ## Commands
 
@@ -386,6 +610,8 @@ All shapes and guards live in `src/shared/types/messaging.ts`.
 | `npm run build` | production Chrome MV3 build |
 | `npm run build:firefox` | Firefox MV2/MV3 build |
 | `npm run compile` | `tsc --noEmit` |
+| `npm test` | unit + integration tests (`vitest`, real IndexedDB via `fake-indexeddb`) |
+| `npm run test:watch` | same, in watch mode |
 | `npm run verify` | build + real-browser acceptance suite |
 | `npm run verify:headless` | same, under `xvfb-run` |
 | `npm run zip` | packaged extension zip |

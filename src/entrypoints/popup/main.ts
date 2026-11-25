@@ -1,7 +1,14 @@
 import './style.css';
 import { getActiveTab, onRuntimeMessage, sendRuntimeMessage, sendTabMessage } from '@/platform/browser/messaging';
+import { isExportEnvelope } from '@/data/export-format';
+import type { XrawlExportEnvelope } from '@/data/export-format';
 import { isStatsBroadcast } from '@/shared/types/messaging';
-import type { DownloadResult, ExportPayload, StatusPayload } from '@/shared/types/messaging';
+import type {
+  DatabaseStatusPayload,
+  DownloadResult,
+  ExportPayload,
+  StatusPayload,
+} from '@/shared/types/messaging';
 
 function elementById(id: string): HTMLElement {
   const element = document.getElementById(id);
@@ -32,6 +39,12 @@ const rescanButton = buttonById('rescan');
 const copyButton = buttonById('copy');
 const downloadButton = buttonById('download');
 const actionButtons = [toggleButton, rescanButton, copyButton, downloadButton];
+
+const dbVersion = elementById('db-version');
+const dbCounts = elementById('db-counts');
+const dbHint = elementById('db-hint');
+const dbExportButton = buttonById('db-export');
+const dbImportInput = document.getElementById('db-import-input');
 
 let tabId: number | null = null;
 let lastStatus: StatusPayload | null = null;
@@ -245,9 +258,112 @@ downloadButton.addEventListener('click', () => {
   });
 });
 
+/* ------------------------------------------------------------------ */
+/* World memory (background-owned database)                           */
+/* ------------------------------------------------------------------ */
+
+function renderDatabaseStatus(status: DatabaseStatusPayload | null): void {
+  if (status === null) {
+    dbVersion.textContent = '';
+    dbCounts.textContent = 'not available';
+    return;
+  }
+
+  dbVersion.textContent = `v${status.schemaVersion}`;
+  dbCounts.textContent = `${status.vocabularyCount} words \u00b7 ${status.feedingCount} feedings`;
+}
+
+function describeBytes(bytes: number): string {
+  if (bytes <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  const exponent = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+  return `${(bytes / 1024 ** exponent).toFixed(exponent === 0 ? 0 : 1)} ${units[exponent]}`;
+}
+
+async function refreshDatabase(): Promise<void> {
+  const status = await sendRuntimeMessage<DatabaseStatusPayload>({ type: 'xrawl/db-status' });
+  if (!status?.ok) {
+    renderDatabaseStatus(null);
+    return;
+  }
+  renderDatabaseStatus(status.data);
+
+  if (status.data.storage) {
+    const { usage, quota, persisted } = status.data.storage;
+    dbHint.textContent = `${describeBytes(usage)} of ${describeBytes(quota)}${persisted ? ' \u00b7 persistent' : ''}`;
+  } else {
+    dbHint.textContent = '';
+  }
+}
+
+dbExportButton.addEventListener('click', () => {
+  void (async () => {
+    const response = await sendRuntimeMessage<XrawlExportEnvelope>({ type: 'xrawl/db-export' });
+    if (!response?.ok) {
+      showError(`Export failed: ${response?.error ?? 'no background worker'}`);
+      return;
+    }
+
+    const envelope = response.data;
+    const json = JSON.stringify(envelope, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `xrawl-world-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+
+    const words = envelope.counts.vocabulary ?? 0;
+    showMessage(`Exported ${words} words \u2014 ${describeBytes(json.length)}.`);
+  })();
+});
+
+async function importWorld(file: File): Promise<void> {
+  clearError();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await file.text());
+  } catch {
+    showError('That file is not valid JSON.');
+    return;
+  }
+
+  if (!isExportEnvelope(parsed)) {
+    showError('That file is not a Xrawl world export.');
+    return;
+  }
+
+  const words = parsed.counts?.vocabulary ?? 0;
+  const confirmed = window.confirm(
+    `Replace the current world with this export (${words} words)? This cannot be undone.`,
+  );
+  if (!confirmed) return;
+
+  const response = await sendRuntimeMessage<{ imported: Record<string, number> }>({
+    type: 'xrawl/db-import',
+    envelope: parsed,
+  });
+  if (!response?.ok) {
+    showError(`Import failed: ${response?.error ?? 'no background worker'}`);
+    return;
+  }
+
+  await refreshDatabase();
+  showMessage(`Imported ${response.data.imported.vocabulary ?? 0} words.`);
+}
+
+dbImportInput?.addEventListener('change', () => {
+  if (!(dbImportInput instanceof HTMLInputElement)) return;
+  const file = dbImportInput.files?.[0];
+  if (file) void importWorld(file);
+  dbImportInput.value = '';
+});
+
 onRuntimeMessage((incoming) => {
   if (!isStatsBroadcast(incoming) || incoming.tabId !== tabId) return;
   renderStatus(incoming.payload);
 });
 
 void load();
+void refreshDatabase();

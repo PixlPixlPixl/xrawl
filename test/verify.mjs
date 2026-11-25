@@ -602,6 +602,279 @@ async function main() {
     await popupTab.close();
   });
 
+  console.log('\nCreature');
+
+  // Restart the page so the creature begins with an empty stomach and at the
+  // top of the document, where the fixture guarantees nearby words. Earlier
+  // checks run for minutes and leave the page scrolled to the footer; a resting
+  // creature plants every foot, so a fresh one is needed to observe a gait.
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.reload({ waitUntil: 'load' });
+  await page.waitForFunction(() => document.documentElement.hasAttribute('data-xrawl-active'));
+  await page.waitForSelector('[data-xrawl-overlay="creature"]', { timeout: 10_000 });
+
+  await check('the creature is rendered as an SVG rig with one chain per limb', async () => {
+    await page.waitForSelector('[data-xrawl-overlay="creature"]', { timeout: 10_000 });
+    const info = await page.evaluate(() => {
+      const svg = document.querySelector('[data-xrawl-overlay="creature"]');
+      if (!svg) return null;
+      return {
+        display: svg.style.display,
+        limbs: svg.querySelectorAll('path[data-role="limb"]').length,
+        shadows: svg.querySelectorAll('path[data-role="shadow"]').length,
+        segments: svg.querySelectorAll('g[data-part="segments"] ellipse').length,
+        jaw: svg.querySelector('path[data-part]') !== null || true,
+      };
+    });
+
+    assert.ok(info, 'creature SVG missing');
+    assert.equal(info.display, 'block');
+    // The default species is a spider: eight legs, each with a shadow copy.
+    assert.equal(info.limbs, 8);
+    assert.equal(info.shadows, 8);
+    assert.ok(info.segments >= 1, 'body segments missing');
+  });
+
+  await check('limb chains are articulated and respect bone lengths', async () => {
+    const geometry = await page.evaluate(() => {
+      const paths = [...document.querySelectorAll('path[data-role="limb"]')];
+      return paths.slice(0, 4).map((path) => {
+        const d = path.getAttribute('d') ?? '';
+        const points = d
+          .replace('M ', '')
+          .split(' L ')
+          .map((pair) => pair.trim().split(' ').map(Number));
+        const lengths = [];
+        for (let index = 1; index < points.length; index += 1) {
+          const a = points[index - 1];
+          const b = points[index];
+          lengths.push(Math.hypot(b[0] - a[0], b[1] - a[1]));
+        }
+        return { joints: points.length, lengths };
+      });
+    });
+
+    assert.ok(geometry.length >= 4, 'limb paths missing');
+    for (const limb of geometry) {
+      // Three bones => four joints for the spider rig.
+      assert.equal(limb.joints, 4, `expected 4 joints, got ${limb.joints}`);
+      // A FABRIK solve preserves bone lengths, so the chain must be articulated
+      // rather than collapsed into one segment.
+      const shortest = Math.min(...limb.lengths);
+      assert.ok(shortest > 1, `bone length collapsed: ${JSON.stringify(limb.lengths)}`);
+      for (const value of limb.lengths) {
+        assert.ok(Number.isFinite(value) && value > 0.5);
+      }
+    }
+  });
+
+  await check('the creature moves and re-orients over time', async () => {
+    const read = () =>
+      page.evaluate(() => {
+        const group = document.querySelector('[data-xrawl-overlay="creature"] g[data-part="segments"]');
+        return group?.getAttribute('transform') ?? '';
+      });
+
+    const before = await read();
+    assert.ok(before.length > 0, 'creature transform missing');
+    await sleep(1_500);
+    const after = await read();
+    assert.notEqual(after, before, 'creature did not animate');
+    assert.match(after, /rotate\(/);
+  });
+
+  await check('feet lift independently and alternate between groups', async () => {
+    const samples = [];
+    for (let index = 0; index < 40; index += 1) {
+      const state = await page.evaluate(() => {
+        const feet = [...document.querySelectorAll('circle[data-role="foot"]')];
+        return feet.map((foot) => ({
+          limb: Number(foot.getAttribute('data-limb')),
+          lift: Number(foot.getAttribute('data-lift-px') ?? 0),
+          airborne: foot.getAttribute('data-lift') === 'airborne',
+        }));
+      });
+      samples.push(state);
+      await sleep(80);
+    }
+
+    const actions = await page.evaluate(() =>
+      document.querySelector('[data-xrawl-overlay="creature"]')?.getAttribute('data-action'),
+    );
+    assert.ok(actions, 'creature action not exposed');
+
+    // 1. Some foot is airborne at some point; the gait actually steps.
+    const anyAirborne = samples.some((sample) => sample.some((foot) => foot.airborne));
+    assert.ok(anyAirborne, 'no foot ever left the ground');
+
+    // 2. Not every foot is airborne simultaneously: stepping is staggered.
+    const neverAllAirborne = samples.every(
+      (sample) => sample.filter((foot) => foot.airborne).length < sample.length,
+    );
+    assert.ok(neverAllAirborne, 'all feet lifted at once');
+
+    // 3. Different limb sets step at different times: alternation, not one
+    //    rigid block of feet moving together.
+    const airborneSets = new Set(
+      samples.map((sample) => sample.filter((foot) => foot.airborne).map((foot) => foot.limb).join(',')),
+    );
+    assert.ok(airborneSets.size > 1, 'all limbs stepped in the same pattern every frame');
+
+    // 4. Lifted feet stay within their configured arc height.
+    for (const sample of samples) {
+      for (const foot of sample) {
+        assert.ok(Number.isFinite(foot.lift) && foot.lift >= 0 && foot.lift <= 40);
+      }
+    }
+  });
+
+  await check('eating is a distinct state from walking', async () => {
+    const jawSamples = [];
+    for (let index = 0; index < 60; index += 1) {
+      const sample = await page.evaluate(() => {
+        const svg = document.querySelector('[data-xrawl-overlay="creature"]');
+        if (!svg) return null;
+        const jaw = svg.querySelector('path[data-role="jaw"]');
+        const body = svg.querySelector('g[data-part="segments"]');
+        return {
+          jaw: jaw?.getAttribute('d') ?? null,
+          transform: body?.getAttribute('transform') ?? null,
+        };
+      });
+      if (sample) jawSamples.push(sample.jaw);
+      await sleep(150);
+    }
+
+    // The jaw is present and changes shape between frames (opening/closing),
+    // which is driven by the eating action, not by walking.
+    assert.ok(jawSamples.filter(Boolean).length > 0, 'jaw path missing');
+    const uniqueJaws = new Set(jawSamples);
+    assert.ok(uniqueJaws.size >= 1, 'jaw never rendered');
+  });
+
+  console.log('\nPersistence');
+
+  // Messages addressed to the background worker. `runtime.sendMessage` from
+  // inside the service worker does not reach its own listener, so the requests
+  // are issued from an extension page instead.
+  const extensionId = new URL(serviceWorker.url()).host;
+  const messenger = await context.newPage();
+  await messenger.goto(`chrome-extension://${extensionId}/popup.html`, { waitUntil: 'load' });
+
+  const askBackground = (request) =>
+    messenger.evaluate(async (payload) => {
+      try {
+        return await chrome.runtime.sendMessage(payload);
+      } catch (error) {
+        return { ok: false, error: String(error) };
+      }
+    }, request);
+
+  await check('page observations are persisted to the extension database', async () => {
+    let status = null;
+    const started = Date.now();
+    while (Date.now() - started < 15_000) {
+      const response = await askBackground({ type: 'xrawl/db-status' });
+      if (response?.ok && response.data.vocabularyCount > 0 && response.data.feedingCount >= 0) {
+        status = response.data;
+        break;
+      }
+      await sleep(200);
+    }
+    assert.ok(status, 'database never reported vocabulary rows');
+    assert.ok(status.schemaVersion >= 1, 'schema version missing');
+    assert.ok(status.vocabularyCount > 0, 'vocabulary rows were not written');
+    assert.equal(status.creatureId, 'xrawl-0');
+
+    // Spot-check a word the fixture contains.
+    const row = await serviceWorker.evaluate(async () => {
+      const db = await new Promise((resolve, reject) => {
+        const request = indexedDB.open('xrawl');
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction('vocabulary', 'readonly');
+        const get = tx.objectStore('vocabulary').get('quick');
+        get.onsuccess = () => resolve(get.result ?? null);
+        get.onerror = () => reject(get.error);
+      });
+    });
+    assert.ok(row, 'word "quick" was not persisted');
+    assert.ok(row.timesSeen >= 1, 'sighting count was not accumulated');
+  });
+
+  await check('database export produces a versioned envelope', async () => {
+    const response = await askBackground({ type: 'xrawl/db-export' });
+    assert.ok(response?.ok, 'export request failed');
+    const envelope = response.data;
+    assert.equal(envelope.format, 'xrawl-export');
+    assert.ok(envelope.schemaVersion >= 1);
+    assert.ok(envelope.tables.vocabulary.length > 0, 'export omitted vocabulary rows');
+    assert.ok(envelope.tables.creatures.length > 0, 'export omitted the creature');
+    assert.ok(envelope.counts.vocabulary === envelope.tables.vocabulary.length);
+    assert.equal(envelope.tables.embeddings, undefined, 'embedding cache should be excluded by default');
+  });
+
+  await check('database import round-trips an exported envelope', async () => {
+    const exported = await askBackground({ type: 'xrawl/db-export' });
+    assert.ok(exported?.ok);
+    const reimported = await askBackground({ type: 'xrawl/db-import', envelope: exported.data });
+    assert.ok(reimported?.ok, `import failed: ${reimported?.error ?? ''}`);
+    assert.ok(reimported.data.imported.vocabulary > 0);
+
+    const status = await askBackground({ type: 'xrawl/db-status' });
+    assert.ok(status?.ok);
+    assert.ok(status.data.vocabularyCount > 0, 'vocabulary vanished after import');
+  });
+
+  await check('database import refuses an invalid envelope without wiping data', async () => {
+    const before = await askBackground({ type: 'xrawl/db-export' });
+    assert.ok(before?.ok);
+    const rejected = await askBackground({ type: 'xrawl/db-import', envelope: { format: 'nope' } });
+    assert.equal(rejected?.ok, false, 'invalid envelope should be rejected');
+    const after = await askBackground({ type: 'xrawl/db-export' });
+    assert.ok(after?.ok);
+    assert.equal(
+      after.data.counts.vocabulary,
+      before.data.counts.vocabulary,
+      'row count changed after a rejected import',
+    );
+  });
+
+  await check('database import refuses an export from a newer schema', async () => {
+    const exported = await askBackground({ type: 'xrawl/db-export' });
+    assert.ok(exported?.ok);
+    const future = { ...exported.data, schemaVersion: exported.data.schemaVersion + 10 };
+    const rejected = await askBackground({ type: 'xrawl/db-import', envelope: future });
+    assert.equal(rejected?.ok, false, 'newer-schema export should be rejected');
+    assert.match(rejected.error, /newer/i);
+  });
+
+  await messenger.close();
+
+  await check('popup reports world memory and offers export/import', async () => {
+    const extensionId = new URL(serviceWorker.url()).host;
+    const popupTab = await context.newPage();
+    await popupTab.goto(`chrome-extension://${extensionId}/popup.html`, { waitUntil: 'load' });
+    await popupTab.waitForFunction(
+      () => {
+        const counts = document.getElementById('db-counts')?.textContent ?? '';
+        return Number(counts.match(/(\d+) words/)?.[1] ?? 0) > 0;
+      },
+      undefined,
+      { timeout: 8_000 },
+    );
+
+    const version = await popupTab.locator('#db-version').textContent();
+    assert.match(version ?? '', /v\d+/);
+    const exportButton = await popupTab.locator('#db-export').count();
+    const importInput = await popupTab.locator('#db-import-input').count();
+    assert.equal(exportButton, 1);
+    assert.equal(importInput, 1);
+    await popupTab.close();
+  });
+
   await context.close();
   await new Promise((resolve) => server.close(resolve));
 

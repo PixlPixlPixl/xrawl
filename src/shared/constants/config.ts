@@ -6,6 +6,7 @@ export const XRAWL_CONFIG = {
   /** Attribute marking elements owned by Xrawl (outlines, HUD, tooltip). */
   overlayAttribute: 'data-xrawl-overlay',
   overlayEnabledStorageKey: 'xrawl.debug.overlayEnabled',
+  creatureEnabledStorageKey: 'xrawl.debug.creatureEnabled',
 
   scan: {
     /** Text nodes measured per animation frame before yielding to the page. */
@@ -65,5 +66,14 @@ export const XRAWL_CONFIG = {
     exportTargetLimit: 8_000,
     /** Minimum interval between stats pushes to the background worker. */
     statsPushIntervalMs: 400,
+  },
+
+  creature: {
+    /** Stacking order: above the word outlines, below any tooltip. */
+    zIndex: '2147483645',
+    /** Frame budget; a frame is skipped rather than run twice. */
+    frameIntervalMs: 16,
+    /** How often the creature re-evaluates its target, in ms. */
+    targetRefreshMs: 900,
   },
 } as const;

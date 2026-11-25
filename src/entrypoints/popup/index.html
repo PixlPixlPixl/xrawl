@@ -43,6 +43,17 @@
         <button id="download" type="button">Download</button>
       </section>
 
+      <section class="database">
+        <h3>Memory <span id="db-version" class="db-version"></span></h3>
+        <div class="db-counts" id="db-counts">not loaded</div>
+        <div class="db-actions">
+          <button id="db-export" type="button">Export world</button>
+          <label class="db-import" for="db-import-input">Import world</label>
+          <input id="db-import-input" type="file" accept="application/json" hidden />
+        </div>
+        <div class="db-hint" id="db-hint"></div>
+      </section>
+
       <div class="message" id="message" role="status"></div>
       <div class="error" id="error" role="alert"></div>
 
