@@ -382,6 +382,9 @@ DevTools to add/remove a paragraph; hover words to inspect targets.
 | popup → content | `xrawl/get-snapshot` | export payload (targets capped for transport) |
 | popup → content | `xrawl/rescan` | force a manual pass |
 | popup → content | `xrawl/set-overlay` | toggle outlines (persisted) |
+| popup → content | `xrawl/set-mode` | companion or foraging (persisted, shared) |
+| popup → content | `xrawl/set-feeding-mode` | modal "click a word to feed it" |
+| popup → content | `xrawl/set-trailing` | companion trailing distance (persisted) |
 | popup → content | `xrawl/download-snapshot` | JSON file download initiated in-page |
 | content → background | `xrawl/observe` | browse-time + word deltas for the database |
 | content → background | `xrawl/feed` | one feeding event (append-only, `source` says who chose it) |
@@ -580,6 +583,12 @@ sides key the dictionary identically.
 | `metabolism.capacity` | stomach capacity | 8 | 30 wp |
 | `senses.reach` | detection radius | 8 | 45 wp |
 | `senses.vocabulary` | maximum word length | 6 | 55 wp |
+| `senses.curiosity` | exploration rate (tries unfamiliar words) | 6 | 60 wp |
+| `senses.selection` | travel-cost weight (better target choice) | 8 | 70 wp |
+| `senses.semantics` | semantic sensitivity (prefers familiar subjects) | 6 | 65 wp |
+
+The last three change *decisions* rather than the body; see
+[Gameplay modes](#gameplay-modes).
 
 Prices compound (`baseCost * growth^(level-1)`). Effects are data in
 `creature/loadout.ts`; the catalog only prices them, and every catalog entry
@@ -750,10 +759,87 @@ the model arrives on first semantic use, then from cache.
 - No fine-tuning: the model is fixed, preference is a profile.
 - No clustering: categories come from anchors plus `general`; emergent labels
   would need a second model.
-- No manual feeding UI yet: the 0.5 influence is wired through `source`, but every
-  current feeding is autonomous.
+- No per-tab creature counts: progression is per creature, not per player, so a
+  lineage is still one row per creature rather than a shared wallet.
 - Hunting priorities are per word, not per occurrence: two `database` targets
   share one score even if their sentences differ.
+
+## Gameplay modes
+
+The same simulation drives two strategies. The mode is shared by every tab, so
+the creature behaves the same wherever it currently is.
+
+| | Companion | Foraging |
+| --- | --- | --- |
+| Movement | trails the pointer at a configurable distance | walks to words it chooses |
+| Eating | on request, plus a rare nearby bite | on its own |
+| Selection | none unless the user picks a word | scored by `S(w)` |
+
+### Companion
+
+The creature walks toward a point `trailing` pixels behind the cursor and stops
+once the pointer is inside that band plus a deadzone, which is what stops it
+vibrating over a link. The distance is configurable (16-320 px, default 96) and
+stored with the other creature settings. Inside the band it still idles and
+rests, so a parked cursor gets animation rather than a frozen frame. It never
+wanders off to forage: the companion eats on request, plus at most one
+opportunistic nearby bite every 14 seconds.
+
+### Manual feeding: a mode, not a default
+
+Clicking a word only feeds it while the **feeding selection mode** is on
+(popup button, or Alt+Shift+F). While it is on, clicks are captured and
+`preventDefault`-ed, a highlight box follows the word under the pointer, and
+Escape exits. While it is off, Xrawl never touches links, buttons or text
+selection - the creature cannot hijack normal browsing. Manual feeding is sent
+with `source: 'manual'`, which is the 0.5 learning influence in
+[Cognition](#cognition).
+
+### Foraging
+
+\[
+S(w) = R(w) + N(w) + A(w) + E(w) - C(w)
+\]
+
+| Term | Meaning | Weight |
+| --- | --- | --- |
+| `R` | rarity from the local frequency table | 0.15 |
+| `N` | novelty (never eaten = 1) | 0.20 |
+| `A` | learned semantic affinity | 0.30, scaled by semantic sensitivity |
+| `E` | browsing interest for the subject | 0.20 |
+| `C` | travel cost, quadratic in distance | 0.50, capped at 1.5 |
+| - | exploration bonus (deterministic word hash) | up to 0.35 |
+
+`C` is why distance matters: a word twice as far costs four times as much, and
+past the detection radius it saturates at 1.5 (above every positive term), so
+a sufficiently remote word can genuinely be refused. Intelligence (travel
+cost) and semantic sensitivity (affinity weight) are what let a creature
+outgrow "grab the nearest thing".
+
+### Upgrades change behaviour, not just speed
+
+| Upgrade | Gameplay effect |
+| --- | --- |
+| `locomotion.speed` | reaches targets sooner (same score, shorter walk) |
+| `senses.reach` | finds words farther away |
+| `senses.vocabulary` | can eat longer words |
+| `digestion.rate` | finishes a word sooner |
+| `metabolism.capacity` | longer feeding sessions before resting |
+| `senses.curiosity` | raises exploration: tries unfamiliar words more often |
+| `senses.selection` | lowers travel cost: walks farther for a better word |
+| `senses.semantics` | raises semantic sensitivity: prefers familiar subjects |
+
+Behaviour attributes are clamped in `creature/loadout.ts` (curiosity <= 0.6,
+travel cost >= 0.2, sensitivity <= 3) so no purchase can make the search
+degenerate into "always the same word" or "distance is free".
+
+### One creature, many tabs
+
+Every tab runs a session and shares the same creature id, progression and
+feeding history, but only the **focused, visible tab** hosts the creature:
+`setPresent` stops rendering and simulating everywhere else. Switching tabs
+therefore does not spawn a second creature with a second opinion - it moves the
+one that exists.
 
 ## Creature
 

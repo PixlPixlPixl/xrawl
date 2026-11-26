@@ -60,8 +60,21 @@ export function explorationUnits(word: string): number {
   return stableUnit(word);
 }
 
-export function isExplorationWord(word: string): boolean {
-  return stableUnit(word) < HUNT_CONFIG.explorationRate;
+/**
+ * Whether this word is an exploration pick, at a given curiosity rate.
+ *
+ * The rate is a parameter because curiosity is an *attribute* (an upgrade): the
+ * background ranks with a default and the engine re-scores with the creature's
+ * real value, so buying curiosity changes what the creature tries.
+ */
+export function isExplorationWord(
+  word: string,
+  rate: number = HUNT_CONFIG.explorationRate,
+): boolean {
+  const chance = Number.isFinite(rate)
+    ? Math.min(1, Math.max(0, rate))
+    : HUNT_CONFIG.explorationRate;
+  return stableUnit(word) < chance;
 }
 
 /**

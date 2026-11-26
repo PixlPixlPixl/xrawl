@@ -21,6 +21,7 @@ import type {
   CreatureAppearance,
   CreatureAttributes,
   CreatureGenetics,
+  CreatureMode,
 } from '@/shared/types/creature';
 import { resolveGenetics } from './species';
 import { resolveLoadout } from './loadout';
@@ -30,7 +31,9 @@ import { GaitController, type BodyTransform } from './movement/gait-controller';
 import { buildPose, type CreaturePose } from './rig/pose';
 import { buildRig, type CreatureRig } from './rig/rig';
 import type { Point } from './rig/fabrik';
-import { findBestTarget, type ForageTarget } from './targets';
+import { type ForageTarget } from './targets';
+import { COMPANION_CONFIG, companionDestination } from './companion';
+import { selectForageTarget } from '@/progression/forage';
 
 export interface CreatureEngineConfig {
   readonly appearance: CreatureAppearance;
@@ -41,12 +44,16 @@ export interface CreatureEngineConfig {
   readonly heading?: number;
 }
 
+/** Who chose the eaten word: the user (manual) or the creature itself. */
+export type FeedingSource = 'manual' | 'autonomous';
+
 /** What the creature ate this tick; the caller decides where it is recorded. */
 export interface FeedingReport {
   readonly target: ForageTarget;
   readonly eatenAt: number;
   readonly nutrition: number;
   readonly preferenceDelta: number;
+  readonly source: FeedingSource;
 }
 
 export interface StepInput {
@@ -57,6 +64,14 @@ export interface StepInput {
   readonly now: number;
   /** 0..1 stomach fullness projection, from the persisted creature state. */
   readonly satiety?: number;
+  /** Which gameplay mode drives target selection this tick. */
+  readonly mode?: CreatureMode;
+  /** Pointer position in document space; companion mode follows it. */
+  readonly follow?: Point | null;
+  /** How far behind the pointer the companion sits, in CSS px. */
+  readonly trailingDistance?: number;
+  /** Word the user just clicked to feed; overrides autonomous selection. */
+  readonly manualTargetId?: string | null;
 }
 
 export interface StepResult {
@@ -86,6 +101,12 @@ export class CreatureEngine {
   private time = 0;
   private currentTarget: ForageTarget | null = null;
   private digestingFor = 0;
+  /** Gameplay mode; set by the session, never inferred from page state. */
+  mode: CreatureMode = 'foraging';
+  /** Set while the current target was chosen by the user. */
+  private manualFingerprint: string | null = null;
+  /** Engine seconds of the last autonomous bite (companion mode). */
+  private lastAutonomousEat = -Infinity;
   /** Fingerprint -> time it was eaten, so a page's words are not re-eaten. */
   private readonly eatenAt = new Map<string, number>();
 
@@ -105,6 +126,11 @@ export class CreatureEngine {
   /** Purchased progression: attributes change, construction does not. */
   setAttributes(attributes: CreatureAttributes): void {
     this.attributes = attributes;
+  }
+
+  /** Switch gameplay mode; selection strategy changes, the body does not. */
+  setMode(mode: CreatureMode): void {
+    this.mode = mode;
   }
 
   /** Evolution: construction changes, so the rig is rebuilt. */
@@ -148,18 +174,24 @@ export class CreatureEngine {
       this.currentTarget = null;
     }
 
+    const mode = input.mode ?? this.mode;
+    this.mode = mode;
+
     if (!this.currentTarget) {
-      const edible = this.filterEdible(input.targets, input.now);
-      // Noticing is gated by the detection radius. While actively foraging the
-      // creature will also head for the nearest word anywhere on the page —
-      // otherwise "foraging" would look identical to idling.
-      const radius = this.attributes.detectionRadius * CREATURE_CONFIG.detectionFactor;
-      const best = findBestTarget(edible, this.movement.position, radius);
-      this.currentTarget =
-        best?.target ??
-        (this.action === 'foraging'
-          ? findBestTarget(edible, this.movement.position, Infinity)?.target ?? null
-          : null);
+      // A manual pick bypasses the eat cooldown: the user asked for *this* word,
+      // and refusing because it was eaten a moment ago would look broken.
+      const manualId = input.manualTargetId ?? null;
+      const manual =
+        manualId === null ? null : input.targets.find((target) => target.id === manualId) ?? null;
+
+      if (manual) {
+        this.currentTarget = manual;
+        this.manualFingerprint = manual.fingerprint;
+      } else {
+        const edible = this.filterEdible(input.targets, input.now);
+        this.currentTarget = this.pickTarget(edible, mode);
+        this.manualFingerprint = null;
+      }
     }
 
     let feeding: FeedingReport | null = null;
@@ -171,15 +203,19 @@ export class CreatureEngine {
       this.eatProgress = Math.min(1, this.eatProgress + eatRate * this.attributes.eatingSpeed * dt);
 
       if (this.eatProgress >= 1 && this.currentTarget) {
+        const manual = this.manualFingerprint !== null;
         this.eatenAt.set(this.currentTarget.fingerprint, input.now);
         feeding = {
           target: this.currentTarget,
           eatenAt: input.now,
           nutrition: Math.min(1, this.currentTarget.interest + 0.35),
           preferenceDelta: this.currentTarget.length / 20,
+          source: manual ? 'manual' : 'autonomous',
         };
         this.stomach = Math.min(this.attributes.stomachCapacity, this.stomach + 1);
         this.digestingFor = 1.6;
+        this.lastAutonomousEat = this.time;
+        this.manualFingerprint = null;
       }
     } else {
       this.digestingFor = Math.max(0, this.digestingFor - dt);
@@ -221,6 +257,30 @@ export class CreatureEngine {
       if (isStationaryAction(decision.action)) this.gait.plantAll(this.transform());
     }
 
+    // Companion mode has no target of its own: it trails the pointer and stops
+    // once the pointer is inside the trailing band. Resting still applies, so a
+    // parked cursor gets idle animation rather than a frozen frame.
+    const followDestination =
+      mode === 'companion' && this.currentTarget === null
+        ? companionDestination(
+            input.follow ?? null,
+            this.movement.position,
+            input.trailingDistance ?? COMPANION_CONFIG.trailingDistancePx,
+          )
+        : null;
+
+    if (mode === 'companion' && this.currentTarget === null) {
+      if (this.action === 'foraging') {
+        // A companion never wanders off to forage; that is the other mode.
+        this.action = followDestination === null ? 'idle' : 'following';
+        this.actionElapsed = 0;
+        if (followDestination === null) this.gait.plantAll(this.transform());
+      } else if (followDestination !== null && isStationaryAction(this.action)) {
+        this.action = 'following';
+        this.actionElapsed = 0;
+      }
+    }
+
     const transform = this.transform();
 
     if (this.currentTarget && !isStationaryAction(this.action)) {
@@ -228,6 +288,12 @@ export class CreatureEngine {
       const result = this.movement.step(dt, destination, {
         maxSpeed: this.attributes.movementSpeed,
         speedScale: ACTION_SPEED_SCALE[this.action],
+      });
+      arrived = result.arrived;
+    } else if (followDestination !== null && !isStationaryAction(this.action)) {
+      const result = this.movement.step(dt, followDestination, {
+        maxSpeed: this.attributes.movementSpeed,
+        speedScale: COMPANION_CONFIG.followSpeedScale,
       });
       arrived = result.arrived;
     } else {
@@ -266,6 +332,44 @@ export class CreatureEngine {
       feeding,
       arrived,
     };
+  }
+
+  /**
+   * Choose the next target, per mode.
+   *
+   * Companion: the user's pick, or an occasional nearby bite.
+   * Foraging: best S(w) inside the detection radius, widening to the whole page
+   * while actively foraging so it does not stall when the nearest word is dull.
+   */
+  private pickTarget(
+    targets: readonly ForageTarget[],
+    mode: CreatureMode,
+  ): ForageTarget | null {
+    if (mode === 'companion') {
+      const sinceLast = this.time - this.lastAutonomousEat;
+      if (sinceLast < COMPANION_CONFIG.autonomousEatIntervalSeconds) return null;
+      return (
+        selectForageTarget(
+          targets,
+          this.movement.position,
+          this.attributes,
+          COMPANION_CONFIG.autonomousEatRadiusPx,
+        )?.candidate ?? null
+      );
+    }
+
+    const radius = this.attributes.detectionRadius * CREATURE_CONFIG.detectionFactor;
+    const best = selectForageTarget(targets, this.movement.position, this.attributes, radius);
+    if (best) return best.candidate;
+
+    if (this.action === 'foraging') {
+      return (
+        selectForageTarget(targets, this.movement.position, this.attributes, Infinity)?.candidate ??
+        null
+      );
+    }
+
+    return null;
   }
 
   /** Targets not still "digesting" from a previous bite. */

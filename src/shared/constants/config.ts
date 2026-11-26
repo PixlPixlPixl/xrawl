@@ -7,6 +7,14 @@ export const XRAWL_CONFIG = {
   overlayAttribute: 'data-xrawl-overlay',
   overlayEnabledStorageKey: 'xrawl.debug.overlayEnabled',
   creatureEnabledStorageKey: 'xrawl.debug.creatureEnabled',
+  /** Persisted gameplay mode, shared by every tab (one creature, one mode). */
+  creatureModeStorageKey: 'xrawl.creature.mode',
+  /** Persisted companion trailing distance, in CSS px. */
+  companionTrailingStorageKey: 'xrawl.creature.trailing',
+  /** Hotkey that toggles the manual feeding selection mode. */
+  feedingModeHotkey: { alt: true, shift: true, code: 'KeyF' },
+  /** Hotkey that toggles the gameplay mode. */
+    modeHotkey: { alt: true, shift: true, code: 'KeyM' },
 
   scan: {
     /** Text nodes measured per animation frame before yielding to the page. */

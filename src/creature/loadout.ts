@@ -29,6 +29,11 @@ export const UPGRADE_EFFECTS: Record<
   'senses.reach': (level) => ({ detectionRadius: 1 + level * 0.15 }),
   'senses.vocabulary': (level) => ({ maximumWordLength: 1 + level * 0.25 }),
   'metabolism.capacity': (level) => ({ stomachCapacity: 1 + level * 0.35 }),
+
+  // Behaviour upgrades: these change *decisions*, not the body.
+  'senses.curiosity': (level) => ({ explorationRate: 1 + level * 0.25 }),
+  'senses.selection': (level) => ({ travelCost: 1 / (1 + level * 0.4) }),
+  'senses.semantics': (level) => ({ semanticSensitivity: 1 + level * 0.3 }),
 };
 
 const MULTIPLIED: readonly (keyof CreatureAttributes)[] = [
@@ -37,7 +42,21 @@ const MULTIPLIED: readonly (keyof CreatureAttributes)[] = [
   'detectionRadius',
   'maximumWordLength',
   'stomachCapacity',
+  'explorationRate',
+  'travelCost',
+  'semanticSensitivity',
 ];
+
+/**
+ * Behaviour attributes are rates and weights, so they are clamped rather than
+ * rounded: curiosity can never reach 100%, and intelligence can never make
+ * travel free (which would make distance meaningless).
+ */
+const BEHAVIOUR_LIMITS: Record<string, readonly [number, number]> = {
+  explorationRate: [0, 0.6],
+  travelCost: [0.2, 1],
+  semanticSensitivity: [0, 3],
+};
 
 /**
  * Apply purchased levels to base attributes.
@@ -70,6 +89,14 @@ export function applyAttributeUpgrades(
   }
   result.maximumWordLength = Math.max(1, Math.round(result.maximumWordLength));
   result.stomachCapacity = Math.max(1, Math.round(result.stomachCapacity));
+
+  for (const [key, [low, high]] of Object.entries(BEHAVIOUR_LIMITS)) {
+    const value = result[key as keyof CreatureAttributes];
+    result[key as keyof CreatureAttributes] = Number.isFinite(value)
+      ? Math.min(high, Math.max(low, value))
+      : low;
+  }
+
   return result;
 }
 

@@ -32,6 +32,25 @@
 
       <div class="meta" id="meta">waiting for the first scan…</div>
 
+      <section class="creature">
+        <h3>Creature <span id="creature-mode-label" class="db-version"></span></h3>
+        <div class="mode-row">
+          <button id="mode-companion" type="button" title="Follows the pointer (Alt+Shift+M)">
+            Companion
+          </button>
+          <button id="mode-foraging" type="button" title="Hunts on its own (Alt+Shift+M)">
+            Foraging
+          </button>
+        </div>
+        <div class="mode-row">
+          <button id="feed-word" type="button" title="Click a word on the page to feed it (Alt+Shift+F)">
+            Feed a word
+          </button>
+          <label class="trailing-label" for="trailing">Trail</label>
+          <input id="trailing" type="number" min="16" max="320" step="4" aria-label="Companion trailing distance in pixels" />
+        </div>
+      </section>
+
       <section class="top-words">
         <h3>Top words</h3>
         <ul id="top-words"></ul>

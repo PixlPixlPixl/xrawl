@@ -16,6 +16,11 @@ import type {
 } from '@/shared/types/messaging';
 import { isContentRequest } from '@/shared/types/messaging';
 import type { WorldSnapshot } from '@/shared/types/word-target';
+import type { CreatureMode } from '@/shared/types/creature';
+import { isCreatureMode } from '@/shared/types/creature';
+import { COMPANION_CONFIG, clampTrailing } from '@/creature/companion';
+import { wordAtPoint } from '@/creature/targets';
+import type { ForagePlan } from '@/progression/forage';
 import { DebugOverlay } from '@/ui/debug/overlay';
 import { WorldState } from '@/world/world-state';
 import { WordScanner } from '@/world/perception/word-scanner';
@@ -24,15 +29,21 @@ import { onRuntimeMessage } from '@/platform/browser/messaging';
 import { observeUrlChanges } from '@/platform/browser/navigation';
 import { ObservationReporter } from './observation-reporter';
 import { CreatureSession } from './creature-session';
+import { FeedingMode } from './feeding-mode';
 import type { FeedingPayload } from '@/data/observation';
 import type { CreatureLoadoutSnapshot } from '@/shared/types/creature';
 
-function buildStatus(snapshot: WorldSnapshot, overlayVisible: boolean): StatusPayload {
+function buildStatus(
+  snapshot: WorldSnapshot,
+  overlayVisible: boolean,
+  creature: StatusPayload['creature'],
+): StatusPayload {
   return {
     stats: snapshot.stats,
     page: snapshot.page,
     environment: snapshot.environment,
     overlayVisible,
+    creature,
     capturedAt: snapshot.capturedAt,
   };
 }
@@ -91,12 +102,17 @@ export function startContentSession(): void {
     isVisible: () => document.visibilityState !== 'hidden' && document.hasFocus(),
   });
 
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') reporter.pause();
-    else reporter.resume();
-  });
-  window.addEventListener('blur', () => reporter.pause());
-  window.addEventListener('focus', () => reporter.resume());
+  // Focus and visibility control three things at once: browse-time accrual,
+  // and whether this tab is the one hosting the single persistent creature.
+  const syncPresence = (): void => {
+    const live = document.visibilityState !== 'hidden' && document.hasFocus();
+    creature.setPresent(live);
+    if (live) reporter.resume();
+    else reporter.pause();
+  };
+  document.addEventListener('visibilitychange', syncPresence);
+  window.addEventListener('blur', syncPresence);
+  window.addEventListener('focus', syncPresence);
 
   const sendFeeding = (payload: FeedingPayload): void => {
     try {
@@ -114,6 +130,64 @@ export function startContentSession(): void {
     sendFeeding,
   });
 
+  let creatureMode: CreatureMode = 'foraging';
+  let trailingDistance: number = COMPANION_CONFIG.trailingDistancePx;
+  let feedingActive = false;
+
+  const creatureStatus = (): StatusPayload['creature'] => ({
+    mode: creatureMode,
+    feedingMode: feedingActive,
+    trailingDistance,
+  });
+
+  /**
+   * Manual feeding mode: only while it is on does a click mean "eat this word".
+   * Everything else about the page stays untouched, which is what keeps the
+   * creature from hijacking links, buttons and selection.
+   */
+  const feeding = new FeedingMode({
+    document,
+    window,
+    resolve: (point) => {
+      const target = wordAtPoint(world.getSnapshot().targets, point);
+      return target === null
+        ? null
+        : { id: target.id, word: target.normalized, rects: target.rects };
+    },
+    onFeed: (candidate) => {
+      creature.feed(candidate.id, candidate.word);
+    },
+    onChange: (active) => {
+      feedingActive = active;
+    },
+  });
+
+  const setFeedingMode = (active: boolean): void => {
+    feedingActive = active;
+    feeding.setActive(active);
+  };
+
+  const setMode = (mode: CreatureMode): void => {
+    creatureMode = mode;
+    creature.setMode(mode);
+    void platform.storage.set(XRAWL_CONFIG.creatureModeStorageKey, mode);
+  };
+
+  const setTrailingDistance = (distance: number): void => {
+    trailingDistance = distance;
+    creature.setTrailingDistance(distance);
+    void platform.storage.set(XRAWL_CONFIG.companionTrailingStorageKey, distance);
+  };
+
+  window.addEventListener(
+    'pointermove',
+    (event) => {
+      if (creatureMode !== 'companion') return;
+      creature.setPointer({ x: event.clientX, y: event.clientY });
+    },
+    { passive: true },
+  );
+
   let statsPushTimer: number | null = null;
   let pendingSnapshot: WorldSnapshot | null = null;
   let lastPushAt = 0;
@@ -122,7 +196,7 @@ export function startContentSession(): void {
   let lastPriorityAt = 0;
 
   const pushStatsNow = (snapshot: WorldSnapshot): void => {
-    const payload = buildStatus(snapshot, overlay.isVisible);
+    const payload = buildStatus(snapshot, overlay.isVisible, creatureStatus());
     try {
       void browser.runtime.sendMessage({ type: 'xrawl/stats', payload }).catch(() => undefined);
     } catch {
@@ -179,9 +253,16 @@ export function startContentSession(): void {
           .then((response: unknown) => {
             const envelope = response as { ok?: boolean; data?: PrioritizePayload } | null;
             if (!envelope?.ok || !envelope.data) return;
-            const map = new Map<string, number>();
-            for (const entry of envelope.data.priorities) map.set(entry.word, entry.priority);
-            creature.applyPriorities(map);
+            const plans = new Map<string, ForagePlan>();
+            for (const entry of envelope.data.priorities) {
+              plans.set(entry.word, {
+                rarity: entry.rarity,
+                novelty: entry.novelty,
+                affinity: entry.relevance,
+                environment: entry.interest,
+              });
+            }
+            creature.applyPlans(plans);
           })
           .catch(() => undefined);
       } catch {
@@ -214,18 +295,30 @@ export function startContentSession(): void {
 
     switch (message.type) {
       case 'xrawl/get-stats':
-        sendResponse(ok(buildStatus(world.getSnapshot(), overlay.isVisible)));
+        sendResponse(ok(buildStatus(world.getSnapshot(), overlay.isVisible, creatureStatus())));
         break;
       case 'xrawl/get-snapshot':
         sendResponse(ok(buildExportPayload(world.getSnapshot())));
         break;
       case 'xrawl/rescan':
         scanner.rescan();
-        sendResponse(ok(buildStatus(world.getSnapshot(), overlay.isVisible)));
+        sendResponse(ok(buildStatus(world.getSnapshot(), overlay.isVisible, creatureStatus())));
         break;
       case 'xrawl/set-overlay':
         toggleOverlay(message.visible);
-        sendResponse(ok(buildStatus(world.getSnapshot(), overlay.isVisible)));
+        sendResponse(ok(buildStatus(world.getSnapshot(), overlay.isVisible, creatureStatus())));
+        break;
+      case 'xrawl/set-mode':
+        setMode(message.mode);
+        sendResponse(ok(buildStatus(world.getSnapshot(), overlay.isVisible, creatureStatus())));
+        break;
+      case 'xrawl/set-feeding-mode':
+        setFeedingMode(message.active);
+        sendResponse(ok(buildStatus(world.getSnapshot(), overlay.isVisible, creatureStatus())));
+        break;
+      case 'xrawl/set-trailing':
+        setTrailingDistance(clampTrailing(message.distance));
+        sendResponse(ok(buildStatus(world.getSnapshot(), overlay.isVisible, creatureStatus())));
         break;
       case 'xrawl/download-snapshot': {
         const payload = buildExportPayload(world.getSnapshot());
@@ -245,20 +338,36 @@ export function startContentSession(): void {
     return false;
   });
 
-  window.addEventListener('keydown', (event) => {
-    if (!event.altKey || !event.shiftKey || event.code !== 'KeyX') return;
+  /** Hotkeys must never fire while the user is typing into the page. */
+  const isTypingTarget = (event: KeyboardEvent): boolean => {
     const target = event.target;
-    if (
+    return (
       target instanceof HTMLElement &&
       (target.isContentEditable ||
         target.tagName === 'INPUT' ||
         target.tagName === 'TEXTAREA' ||
         target.tagName === 'SELECT')
-    ) {
+    );
+  };
+
+  window.addEventListener('keydown', (event) => {
+    if (!event.altKey || !event.shiftKey || isTypingTarget(event)) return;
+
+    // Alt+Shift+X: outlines. Alt+Shift+F: feed a word. Alt+Shift+M: mode.
+    if (event.code === XRAWL_CONFIG.feedingModeHotkey.code) {
+      event.preventDefault();
+      setFeedingMode(!feedingActive);
       return;
     }
-    event.preventDefault();
-    toggleOverlay(!overlay.isVisible);
+    if (event.code === XRAWL_CONFIG.modeHotkey.code) {
+      event.preventDefault();
+      setMode(creatureMode === 'companion' ? 'foraging' : 'companion');
+      return;
+    }
+    if (event.code === 'KeyX') {
+      event.preventDefault();
+      toggleOverlay(!overlay.isVisible);
+    }
   });
 
   void (async () => {
@@ -273,6 +382,21 @@ export function startContentSession(): void {
     );
     creature.mount();
     creature.setVisible(creatureEnabled);
+    syncPresence();
+
+    // Mode and trailing distance are shared by every tab: one creature, one
+    // configuration, wherever it currently happens to be standing.
+    const storedMode = await platform.storage.get<CreatureMode>(
+      XRAWL_CONFIG.creatureModeStorageKey,
+      'foraging',
+    );
+    setMode(isCreatureMode(storedMode) ? storedMode : 'foraging');
+    const storedTrailing = await platform.storage.get<number>(
+      XRAWL_CONFIG.companionTrailingStorageKey,
+      COMPANION_CONFIG.trailingDistancePx,
+    );
+    setTrailingDistance(clampTrailing(storedTrailing));
+
     scanner.start();
 
     // The background owns the database, so the live loadout (species genes +

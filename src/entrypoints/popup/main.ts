@@ -25,6 +25,12 @@ function selectById(id: string): HTMLSelectElement {
   return element;
 }
 
+function inputById(id: string): HTMLInputElement {
+  const element = document.getElementById(id);
+  if (!(element instanceof HTMLInputElement)) throw new Error(`Popup input #${id} is missing`);
+  return element;
+}
+
 function buttonById(id: string): HTMLButtonElement {
   const element = document.getElementById(id);
   if (!(element instanceof HTMLButtonElement)) throw new Error(`Popup button #${id} is missing`);
@@ -59,6 +65,61 @@ const upgradeList = elementById('upgrade-list');
 const wpBalance = elementById('wp-balance');
 const siteInterestSummary = elementById('site-interest-summary');
 const siteInterestSelect = selectById('site-interest-select');
+
+const modeCompanionButton = buttonById('mode-companion');
+const modeForagingButton = buttonById('mode-foraging');
+const feedButton = buttonById('feed-word');
+const trailingInput = inputById('trailing');
+const creatureModeLabel = elementById('creature-mode-label');
+
+/** Controls are dumb: the content script owns the mode, the popup only asks. */
+function applyCreatureStatus(creature: StatusPayload['creature'] | null): void {
+  if (creature === null) {
+    creatureModeLabel.textContent = 'offline';
+    modeCompanionButton.dataset.on = 'false';
+    modeForagingButton.dataset.on = 'false';
+    feedButton.dataset.on = 'false';
+    feedButton.textContent = 'Feed a word';
+    trailingInput.disabled = true;
+    return;
+  }
+
+  creatureModeLabel.textContent = creature.mode;
+  modeCompanionButton.dataset.on = String(creature.mode === 'companion');
+  modeForagingButton.dataset.on = String(creature.mode === 'foraging');
+  feedButton.dataset.on = String(creature.feedingMode);
+  feedButton.textContent = creature.feedingMode ? 'Feeding: on (Esc)' : 'Feed a word';
+  trailingInput.disabled = creature.mode !== 'companion';
+  // Do not fight the user while they are editing the number.
+  if (document.activeElement !== trailingInput) {
+    trailingInput.value = String(creature.trailingDistance);
+  }
+}
+
+function sendCreatureControl(message: Record<string, unknown>): void {
+  if (tabId === null) return;
+  void sendTabMessage<StatusPayload>(tabId, message).then((response) => {
+    if (response?.ok) renderStatus(response.data);
+    else renderOffline('Xrawl is offline on this tab');
+  });
+}
+
+modeCompanionButton.addEventListener('click', () => {
+  sendCreatureControl({ type: 'xrawl/set-mode', mode: 'companion' });
+});
+modeForagingButton.addEventListener('click', () => {
+  sendCreatureControl({ type: 'xrawl/set-mode', mode: 'foraging' });
+});
+feedButton.addEventListener('click', () => {
+  const active = lastStatus?.creature.feedingMode ?? false;
+  sendCreatureControl({ type: 'xrawl/set-feeding-mode', active: !active });
+});
+trailingInput.addEventListener('change', () => {
+  const distance = Number(trailingInput.value);
+  if (!Number.isFinite(distance)) return;
+  sendCreatureControl({ type: 'xrawl/set-trailing', distance });
+});
+
 
 let tabId: number | null = null;
 let lastStatus: StatusPayload | null = null;
@@ -115,6 +176,7 @@ function renderStatus(status: StatusPayload): void {
 
   const stats = status.stats;
   pageTitle.textContent = status.page.title || '(untitled page)';
+  applyCreatureStatus(status.creature);
   void refreshSiteInterest();
   pageUrl.textContent = status.page.url;
   pageUrl.title = status.page.url;
@@ -163,6 +225,7 @@ function renderOffline(title: string): void {
   statRects.textContent = '0';
   meta.textContent = '\u2014';
   renderTopWords([]);
+  applyCreatureStatus(null);
   toggleButton.textContent = 'offline';
   toggleButton.dataset.on = 'false';
   showError(

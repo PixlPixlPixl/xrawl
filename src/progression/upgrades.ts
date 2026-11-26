@@ -71,6 +71,35 @@ export const UPGRADE_CATALOG: readonly UpgradeDefinition[] = [
     baseCost: 55,
     costGrowth: 1.6,
   },
+  // Behaviour upgrades. They cost more than raw stats because they change what
+  // the creature does, not only how fast it does it.
+  {
+    id: 'senses.curiosity',
+    name: 'Curiosity',
+    description: 'Try unfamiliar words more often instead of only favourites.',
+    category: 'senses',
+    maxLevel: 6,
+    baseCost: 60,
+    costGrowth: 1.6,
+  },
+  {
+    id: 'senses.selection',
+    name: 'Keen judgement',
+    description: 'Weigh the walk against the word: pick better targets.',
+    category: 'senses',
+    maxLevel: 8,
+    baseCost: 70,
+    costGrowth: 1.6,
+  },
+  {
+    id: 'senses.semantics',
+    name: 'Sharp sense',
+    description: 'Prefer words that resemble what it already likes.',
+    category: 'senses',
+    maxLevel: 6,
+    baseCost: 65,
+    costGrowth: 1.6,
+  },
 ];
 
 export function findUpgrade(id: string): UpgradeDefinition | undefined {

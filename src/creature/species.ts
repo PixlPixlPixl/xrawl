@@ -106,6 +106,12 @@ export function attributesFromGenetics(genetics: CreatureGenetics): CreatureAttr
     detectionRadius: 90 + genetics.perception * 170,
     maximumWordLength: Math.round(6 + genetics.reach * 14),
     stomachCapacity: Math.round(3 + genetics.capacity * 9),
+    // Behaviour genes. Perception makes the spider a slightly better chooser,
+    // but these start modest: upgrades, not birth, are how a creature becomes
+    // curious or decisive.
+    explorationRate: 0.2 + genetics.perception * 0.1,
+    travelCost: 1,
+    semanticSensitivity: 1,
   };
 }
 

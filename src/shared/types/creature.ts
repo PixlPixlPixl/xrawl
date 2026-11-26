@@ -50,6 +50,20 @@ export interface CreatureAppearance {
   readonly style: CreatureStyle;
 }
 
+/**
+ * How the creature decides what to eat. Companion mode follows the pointer and
+ * only eats on request; foraging mode hunts on its own.
+ */
+export type CreatureMode = 'companion' | 'foraging';
+
+export const CREATURE_MODES: readonly CreatureMode[] = ['companion', 'foraging'];
+
+export const DEFAULT_CREATURE_MODE: CreatureMode = 'foraging';
+
+export function isCreatureMode(value: unknown): value is CreatureMode {
+  return value === 'companion' || value === 'foraging';
+}
+
 /** Gameplay capabilities. Progression mutates these; species seeds them. */
 export interface CreatureAttributes {
   /** Body translation speed in CSS px per second. */
@@ -62,6 +76,23 @@ export interface CreatureAttributes {
   readonly maximumWordLength: number;
   /** How many words it can hold before needing to rest. */
   readonly stomachCapacity: number;
+  /**
+   * Fraction of words treated as exploration picks rather than preference
+   * matches. Raised by curiosity: a curious creature does not only eat what it
+   * already likes.
+   */
+  readonly explorationRate: number;
+  /**
+   * Weight of travel distance when scoring targets. Lower is better selection:
+   * a smart creature tolerates a longer walk for a much better word.
+   */
+  readonly travelCost: number;
+  /**
+   * How strongly learned semantic preference (A) outweighs novelty. Raised by
+   * semantic sensitivity: the creature prefers words that resemble what it
+   * already likes.
+   */
+  readonly semanticSensitivity: number;
 }
 
 /**

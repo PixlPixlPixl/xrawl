@@ -15,7 +15,9 @@ import { resolveLoadout } from '@/creature/loadout';
 import { CreatureRenderer } from '@/creature/render/svg-renderer';
 import { getSpecies, resolveGenetics } from '@/creature/species';
 import { buildForageTargets, type ForageTarget } from '@/creature/targets';
-import type { CreatureGenetics } from '@/shared/types/creature';
+import { clampTrailing } from '@/creature/companion';
+import type { ForagePlan } from '@/progression/forage';
+import { DEFAULT_CREATURE_MODE, type CreatureGenetics, type CreatureMode } from '@/shared/types/creature';
 import type { WorldSnapshot } from '@/shared/types/word-target';
 import type { FeedingPayload } from '@/data/observation';
 
@@ -57,8 +59,25 @@ export class CreatureSession {
 
   private currentCreatureId: string;
   private targetCache: { revision: number; targets: ForageTarget[] } | null = null;
-  /** Learned hunting priorities keyed by normalized word, from the background. */
-  private priorities: ReadonlyMap<string, number> = new Map();
+  /** Learned scoring components keyed by normalized word, from the background. */
+  private plans: ReadonlyMap<string, ForagePlan> = new Map();
+
+  /** Gameplay mode; companion follows the pointer, foraging hunts alone. */
+  private mode: CreatureMode = DEFAULT_CREATURE_MODE;
+  /** Pointer position in document space, for companion trailing. */
+  private pointer: { x: number; y: number } | null = null;
+  private trailingDistance = 96;
+  /** Word the user clicked in feeding mode, until it is eaten or vanishes. */
+  private manualTargetId: string | null = null;
+
+  /** The user's creature toggle (popup), independent of whether this tab is live. */
+  private enabled = true;
+  /**
+   * Whether this tab currently *hosts* the creature. One persistent creature
+   * transfers between active tabs: the others hide it rather than spawning a
+   * second one with a separate history.
+   */
+  private present = true;
 
   constructor(options: CreatureSessionOptions) {
     this.options = options;
@@ -100,11 +119,67 @@ export class CreatureSession {
     this.mounted = false;
   }
 
+  /** Popup toggle: the creature is enabled at all. */
   setVisible(visible: boolean): void {
-    const element = this.renderer.element;
-    element.style.display = visible ? 'block' : 'none';
+    this.enabled = visible;
+    this.applyVisibility();
+  }
+
+  /**
+   * Whether this tab is the one hosting the creature.
+   *
+   * A background tab keeps its session (and its snapshot cache) but stops
+   * rendering and simulating; the creature reappears here the moment the tab is
+   * focused again, with the same identity and progression.
+   */
+  setPresent(present: boolean): void {
+    this.present = present;
+    this.applyVisibility();
+  }
+
+  private applyVisibility(): void {
+    const visible = this.enabled && this.present;
+    this.renderer.element.style.display = visible ? 'block' : 'none';
     if (visible) this.start();
     else this.stop();
+  }
+
+  setMode(mode: CreatureMode): void {
+    this.mode = mode;
+    this.engine.setMode(mode);
+    this.manualTargetId = null;
+    this.targetCache = null;
+  }
+
+  getMode(): CreatureMode {
+    return this.mode;
+  }
+
+  /** Pointer in document space; the engine only reads it in companion mode. */
+  setPointer(point: { x: number; y: number } | null): void {
+    this.pointer = point;
+  }
+
+  setTrailingDistance(distance: number): void {
+    this.trailingDistance = clampTrailing(distance);
+  }
+
+  /**
+   * Ask the creature to eat a specific word (manual feeding mode).
+   *
+   * Returns false when the word is no longer on the page, so the caller can tell
+   * the user rather than silently doing nothing.
+   */
+  feed(targetId: string | null, word?: string): boolean {
+    if (!this.snapshot) return false;
+    const targets = this.currentTargets();
+    const match =
+      (targetId === null ? undefined : targets.find((target) => target.id === targetId)) ??
+      (word === undefined ? undefined : targets.find((target) => target.word === word));
+
+    if (!match) return false;
+    this.manualTargetId = match.id;
+    return true;
   }
 
   /** Feed page snapshots in; the creature only consumes eligible words. */
@@ -149,17 +224,43 @@ export class CreatureSession {
     const dt = Math.min(0.12, Math.max(0, (now - this.lastFrameAt) / 1000));
     this.lastFrameAt = now;
 
+    const viewport = this.options.platform.viewport.read();
     const targets = this.currentTargets();
+    // A manual pick whose word has left the page is stale: forgetting it stops
+    // the engine asking for a target that no longer exists.
+    if (this.manualTargetId !== null && !targets.some((target) => target.id === this.manualTargetId)) {
+      this.manualTargetId = null;
+    }
+
+    // The pointer is tracked in client coordinates (that is what events carry);
+    // the engine works in document space, so the scroll offset is applied here.
+    const follow =
+      this.pointer === null
+        ? null
+        : { x: this.pointer.x + viewport.scroll.x, y: this.pointer.y + viewport.scroll.y };
+
     const result = this.engine.step({
       dtSeconds: dt,
       targets,
       now: Date.now(),
       satiety: this.satietyFromSnapshot(),
+      mode: this.mode,
+      follow,
+      trailingDistance: this.trailingDistance,
+      manualTargetId: this.manualTargetId,
     });
 
-    if (result.feeding) this.reportFeeding(result.feeding.target, result.feeding.eatenAt, result.feeding.nutrition, result.feeding.preferenceDelta);
+    if (result.feeding) {
+      if (result.feeding.source === 'manual') this.manualTargetId = null;
+      this.reportFeeding(
+        result.feeding.target,
+        result.feeding.eatenAt,
+        result.feeding.nutrition,
+        result.feeding.preferenceDelta,
+        result.feeding.source,
+      );
+    }
 
-    const viewport = this.options.platform.viewport.read();
     this.renderer.render(result.pose, {
       scrollX: viewport.scroll.x,
       scrollY: viewport.scroll.y,
@@ -180,7 +281,7 @@ export class CreatureSession {
 
     const targets = buildForageTargets(snapshot.targets, {
       maximumWordLength: this.forageFilters.maximumWordLength,
-      priorities: this.priorities,
+      plans: this.plans,
     });
     this.targetCache = { revision: snapshot.revision, targets };
     return targets;
@@ -195,6 +296,7 @@ export class CreatureSession {
     eatenAt: number,
     nutrition: number,
     preferenceDelta: number,
+    source: 'manual' | 'autonomous',
   ): void {
     const snapshot = this.snapshot;
     if (!snapshot) return;
@@ -209,6 +311,7 @@ export class CreatureSession {
       pageTitle: snapshot.page.title,
       contextSentence: target.contextSentence,
       fingerprint: target.fingerprint,
+      source,
       nutrition,
       preferenceDelta,
     });
@@ -242,14 +345,14 @@ export class CreatureSession {
   }
 
   /**
-   * Replace the learned priorities for the words on this page.
+   * Replace the learned scoring components for the words on this page.
    *
-   * The candidate list is rebuilt (not patched) because selection reads
-   * `priority` from every target: patching a subset would leave the rest on
-   * their rarity fallback and quietly bias the comparison.
+   * The candidate list is rebuilt (not patched) because every target carries its
+   * components: patching a subset would leave the rest on their fallback plan and
+   * quietly bias the comparison.
    */
-  applyPriorities(priorities: ReadonlyMap<string, number>): void {
-    this.priorities = priorities;
+  applyPlans(plans: ReadonlyMap<string, ForagePlan>): void {
+    this.plans = plans;
     this.targetCache = null;
   }
 

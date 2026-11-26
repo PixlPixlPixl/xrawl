@@ -1,6 +1,16 @@
 import { INTEREST_KINDS } from '@/progression/interests';
+import { isCreatureMode, type CreatureMode } from './creature';
 import type { EnvironmentKind, EnvironmentClassification, PageInfo } from './page';
 import type { ScanStats, WorldSnapshot } from './word-target';
+
+/** How the creature is currently being driven in this tab. */
+export interface CreatureStatusPayload {
+  readonly mode: CreatureMode;
+  /** True while clicks feed words instead of reaching the page. */
+  readonly feedingMode: boolean;
+  /** Companion trailing distance behind the pointer, in CSS px. */
+  readonly trailingDistance: number;
+}
 
 export interface StatusPayload {
   readonly stats: ScanStats;
@@ -8,6 +18,7 @@ export interface StatusPayload {
   readonly environment: EnvironmentClassification;
   /** Whether the in-page outline overlay is currently shown. */
   readonly overlayVisible: boolean;
+  readonly creature: CreatureStatusPayload;
   readonly capturedAt: number;
 }
 
@@ -36,6 +47,11 @@ export type ContentRequest =
   | { readonly type: 'xrawl/get-snapshot' }
   | { readonly type: 'xrawl/rescan' }
   | { readonly type: 'xrawl/set-overlay'; readonly visible: boolean }
+  /** Switch the creature between companion and foraging behaviour. */
+  | { readonly type: 'xrawl/set-mode'; readonly mode: CreatureMode }
+  /** Toggle the modal "click a word to feed it" selection mode. */
+  | { readonly type: 'xrawl/set-feeding-mode'; readonly active: boolean }
+  | { readonly type: 'xrawl/set-trailing'; readonly distance: number }
   | { readonly type: 'xrawl/download-snapshot' };
 
 /* ------------------------------------------------------------------------- */
@@ -180,6 +196,10 @@ export interface PrioritizePayload {
     readonly priority: number;
     readonly relevance: number;
     readonly novelty: number;
+    /** 0..1 rarity from the local frequency table. */
+    readonly rarity: number;
+    /** 0..1 browsing interest for this word's subject. */
+    readonly interest: number;
     readonly exploration: number;
   }>;
 }
@@ -253,6 +273,12 @@ export function isContentRequest(message: unknown): message is ContentRequest {
       return true;
     case 'xrawl/set-overlay':
       return typeof message.visible === 'boolean';
+    case 'xrawl/set-mode':
+      return isCreatureMode(message.mode);
+    case 'xrawl/set-feeding-mode':
+      return typeof message.active === 'boolean';
+    case 'xrawl/set-trailing':
+      return typeof message.distance === 'number' && Number.isFinite(message.distance);
     default:
       return false;
   }

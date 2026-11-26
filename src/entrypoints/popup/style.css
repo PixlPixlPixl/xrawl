@@ -293,6 +293,53 @@ button:disabled {
   min-height: 12px;
 }
 
+.creature {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 8px 10px;
+  display: grid;
+  gap: 6px;
+}
+
+.creature h3 {
+  margin: 0;
+  font-size: 9px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.mode-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.mode-row > button {
+  flex: 1 1 0;
+}
+
+.mode-row button[data-on='true'] {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.trailing-label {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+#trailing {
+  width: 62px;
+  font: inherit;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 4px 6px;
+}
+
 .site-interest {
   background: var(--panel);
   border: 1px solid var(--border);
