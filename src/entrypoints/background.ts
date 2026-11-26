@@ -20,8 +20,10 @@ import {
   isDatabaseImportRequest,
   isDatabaseStatusRequest,
   isFeedMessage,
+  isJournalRequest,
   isObserveMessage,
   isPrioritizeRequest,
+  isSetContextStorageRequest,
   isSetSiteInterestRequest,
   isSiteInterestRequest,
   isStatsPushMessage,
@@ -29,6 +31,7 @@ import {
 } from '@/shared/types/messaging';
 import type {
   PrioritizePayload,
+  SetContextStoragePayload,
   SetSiteInterestPayload,
   SiteInterestPayload,
   StatusPayload,
@@ -38,8 +41,26 @@ import type {
 import { INTEREST_KINDS, INTEREST_LABELS, type InterestKind } from '@/progression/interests';
 import type { PurchaseOutcome } from '@/data/progression';
 import { OBSERVATION_LIMITS } from '@/data/observation';
+import { XRAWL_CONFIG } from '@/shared/constants/config';
 
 const statsByTab = new Map<number, StatusPayload>();
+const CONTEXT_STORAGE_KEY = XRAWL_CONFIG.journal.storeContextStorageKey;
+
+/**
+ * The context-storage preference.
+ *
+ * Read on every feeding rather than cached: a service worker is restarted often
+ * enough that a cache would be stale, and one `storage.local.get` is cheap next
+ * to the transaction it precedes.
+ */
+async function readContextStorage(): Promise<boolean> {
+  try {
+    const stored = await browser.storage.local.get(CONTEXT_STORAGE_KEY);
+    return stored[CONTEXT_STORAGE_KEY] === true;
+  } catch {
+    return false;
+  }
+}
 
 const ok = <T>(data: T): XrawlResponse<T> => ({ ok: true, data });
 
@@ -77,6 +98,7 @@ const fail = (error: unknown): XrawlResponse<never> => ({
 export default defineBackground(() => {
   const database: DatabaseService = createDatabaseService({
     appVersion: browser.runtime.getManifest().version,
+    readContextStorage,
     // Static extension storage outlives a wiped IndexedDB, so the popup can tell
     // the difference between a fresh install and lost history.
     onOpened: (now) => {
@@ -135,8 +157,10 @@ export default defineBackground(() => {
     }
 
     if (isFeedMessage(message)) {
-      void database
-        .ingestFeeding(message.payload)
+      void (async () => {
+        const storeContext = await readContextStorage();
+        return database.ingestFeeding(message.payload, { storeContext });
+      })()
         .then((written) => {
           if (!written) {
             sendResponse(fail('invalid feeding payload'));
@@ -210,6 +234,25 @@ export default defineBackground(() => {
         .setSiteInterest(message.host, interest)
         .then((value) => {
           const payload: SetSiteInterestPayload = { host: message.host, override: value };
+          sendResponse(ok(payload));
+        })
+        .catch((error: unknown) => sendResponse(fail(error)));
+      return true;
+    }
+
+    if (isJournalRequest(message)) {
+      void database
+        .journal(message.query)
+        .then((payload) => sendResponse(ok(payload)))
+        .catch((error: unknown) => sendResponse(fail(error)));
+      return true;
+    }
+
+    if (isSetContextStorageRequest(message)) {
+      void browser.storage.local
+        .set({ [CONTEXT_STORAGE_KEY]: message.enabled })
+        .then(() => {
+          const payload: SetContextStoragePayload = { contextStorage: message.enabled };
           sendResponse(ok(payload));
         })
         .catch((error: unknown) => sendResponse(fail(error)));

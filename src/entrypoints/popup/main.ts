@@ -1,4 +1,5 @@
 import './style.css';
+import { browser } from '#imports';
 import { getActiveTab, onRuntimeMessage, sendRuntimeMessage, sendTabMessage } from '@/platform/browser/messaging';
 import { isExportEnvelope } from '@/data/export-format';
 import type { XrawlExportEnvelope } from '@/data/export-format';
@@ -60,6 +61,7 @@ const dbCounts = elementById('db-counts');
 const dbInterests = elementById('db-interests');
 const dbHint = elementById('db-hint');
 const dbExportButton = buttonById('db-export');
+const journalButton = buttonById('open-journal');
 const dbImportInput = document.getElementById('db-import-input');
 const upgradeList = elementById('upgrade-list');
 const wpBalance = elementById('wp-balance');
@@ -563,6 +565,12 @@ async function refreshDatabase(): Promise<void> {
     dbHint.textContent = '';
   }
 }
+
+journalButton.addEventListener('click', () => {
+  // The journal is its own page, not a popup tab: it needs room for a table,
+  // a search box and a word detail panel at once.
+  void browser.tabs.create({ url: browser.runtime.getURL('/journal.html') });
+});
 
 dbExportButton.addEventListener('click', () => {
   void (async () => {

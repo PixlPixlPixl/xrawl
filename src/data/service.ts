@@ -16,7 +16,9 @@ import type { XrawlDatabase, XrawlDbOptions } from './db';
 import { openXrawlDatabase } from './db';
 import { exportDatabase, importDatabase, type ImportResult } from './export';
 import type { XrawlExportEnvelope } from './export-format';
-import { ingestFeeding, ingestObservation, type IngestResult } from './ingest';
+import { ingestFeeding, ingestObservation, type IngestFeedingOptions, type IngestResult } from './ingest';
+import { journalFeedings, journalOverview, journalVocabulary, journalWordDetail } from './journal';
+import type { JournalPayload, JournalQuery } from '@/shared/types/journal';
 import type { FeedingPayload, ObservationPayload } from './observation';
 import { getSpecies, resolveGenetics } from '@/creature/species';
 import { resolveLoadout } from '@/creature/loadout';
@@ -113,12 +115,20 @@ export interface DatabaseServiceOptions extends XrawlDbOptions {
   readonly onOpened?: (now: number) => void;
   /** Embedding backend; injected by tests, lazily loads MiniLM in production. */
   readonly semantics?: SemanticService;
+  /**
+   * The user's "store page context" preference. Injected because the data layer
+   * must not touch browser storage; the background passes a reader that resolves
+   * it from `storage.local`.
+   */
+  readonly readContextStorage?: () => Promise<boolean>;
 }
 
 export interface DatabaseService {
   status(): Promise<DatabaseStatus>;
   ingestObservation(payload: ObservationPayload): Promise<IngestResult>;
-  ingestFeeding(payload: FeedingPayload): Promise<boolean>;
+  ingestFeeding(payload: FeedingPayload, options?: IngestFeedingOptions): Promise<boolean>;
+  /** Read-only projection of the history tables for the journal page. */
+  journal(query: JournalQuery): Promise<JournalPayload>;
   creatureLoadout(): Promise<CreatureLoadoutSnapshot | null>;
   purchaseUpgrade(upgradeId: string): Promise<PurchaseOutcome>;
   /** Learn from a feeding; safe to call after the transaction has committed. */
@@ -249,8 +259,33 @@ export function createDatabaseService(options: DatabaseServiceOptions): Database
       return ingestObservation(await open(), payload);
     },
 
-    async ingestFeeding(payload) {
-      return ingestFeeding(await open(), payload);
+    async ingestFeeding(payload, ingestOptions) {
+      return ingestFeeding(await open(), payload, ingestOptions);
+    },
+
+    async journal(query) {
+      const db = await open();
+      const contextStorage = options.readContextStorage;
+      switch (query.view) {
+        case 'settings':
+          return { contextStorage: contextStorage ? await contextStorage() : false };
+        case 'overview':
+          return journalOverview(db, {
+            contextStorage: contextStorage ? await contextStorage() : false,
+          });
+        case 'feedings':
+          return journalFeedings(db, query);
+        case 'vocabulary':
+          return journalVocabulary(db, query);
+        case 'word':
+          return journalWordDetail(db, query.word);
+        default: {
+          // Exhaustiveness guard: a new view added to the union without a reader
+          // fails here instead of resolving undefined into the page.
+          const unreachable: never = query;
+          throw new Error(`unknown journal view: ${JSON.stringify(unreachable)}`);
+        }
+      }
     },
 
     async learnFromFeeding(payload) {

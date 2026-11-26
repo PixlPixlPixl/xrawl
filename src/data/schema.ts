@@ -20,7 +20,8 @@ export const XRAWL_DB_NAME = 'xrawl';
 export const XRAWL_TABLE_SCHEMAS = {
   creatures: 'id, bornAt, updatedAt, stage',
   vocabulary: 'word, timesSeen, timesEaten, firstSeenAt, lastSeenAt, firstEatenAt, lastEatenAt',
-  feedingEvents: 'id, eatenAt, word, creatureId, environment, [creatureId+eatenAt], [word+eatenAt]',
+  feedingEvents:
+    'id, eatenAt, word, creatureId, environment, host, [creatureId+eatenAt], [word+eatenAt], [host+eatenAt]',
   environments: 'id, kind, exposureMs, lastExposedAt',
   sessions: 'id, startedAt, lastActiveAt, endedAt',
   upgrades: 'id, purchasedAt, updatedAt',
@@ -132,6 +133,18 @@ export interface FeedingEventRecord {
   /** Event-local scoring inputs; interpretation belongs to progression, not data. */
   nutrition: number;
   preferenceDelta: number;
+  /**
+   * Host derived from `pageUrl`, indexed separately so the journal can list and
+   * search "everything eaten on this site" without scanning every row.
+   */
+  host: string;
+  /**
+   * What the feeding paid. Stored on the event because a reward can only be
+   * computed from the state *before* it was applied - replaying the log later
+   * would pay different amounts. 0 means "recorded before v7 journaled rewards".
+   */
+  points: number;
+  xp: number;
 }
 
 /* ------------------------------------------------------------------------- */

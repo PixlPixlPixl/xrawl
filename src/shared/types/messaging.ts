@@ -1,5 +1,6 @@
 import { INTEREST_KINDS } from '@/progression/interests';
 import { isCreatureMode, type CreatureMode } from './creature';
+import { isJournalQuery, type JournalQuery } from './journal';
 import type { EnvironmentKind, EnvironmentClassification, PageInfo } from './page';
 import type { ScanStats, WorldSnapshot } from './word-target';
 
@@ -222,6 +223,27 @@ export interface UpgradePurchasePayload {
   readonly wordPoints: number;
 }
 
+/** Journal page → background: one read-only history query. */
+export interface JournalRequest {
+  readonly type: 'xrawl/journal';
+  readonly query: JournalQuery;
+}
+
+/**
+ * Journal page → background: should page context be stored?
+ *
+ * Off by default. Context is embedded in memory at learn time either way; this
+ * only decides whether the sentence survives in the log afterwards.
+ */
+export interface SetContextStorageRequest {
+  readonly type: 'xrawl/set-context-storage';
+  readonly enabled: boolean;
+}
+
+export interface SetContextStoragePayload {
+  readonly contextStorage: boolean;
+}
+
 /** popup → background: whole-database JSON. */
 export interface DatabaseExportRequest {
   readonly type: 'xrawl/db-export';
@@ -243,7 +265,9 @@ export type PersistenceRequest =
   | DatabaseExportRequest
   | DatabaseImportRequest
   | CreatureLoadoutRequest
-  | UpgradePurchaseRequest;
+  | UpgradePurchaseRequest
+  | JournalRequest
+  | SetContextStorageRequest;
 
 export interface ExportPayload {
   readonly snapshot: WorldSnapshot;
@@ -420,6 +444,18 @@ export function isDatabaseExportRequest(message: unknown): message is DatabaseEx
 
 export function isDatabaseImportRequest(message: unknown): message is DatabaseImportRequest {
   return isObject(message) && message.type === 'xrawl/db-import' && 'envelope' in message;
+}
+
+export function isJournalRequest(message: unknown): message is JournalRequest {
+  return isObject(message) && message.type === 'xrawl/journal' && isJournalQuery(message.query);
+}
+
+export function isSetContextStorageRequest(
+  message: unknown,
+): message is SetContextStorageRequest {
+  return (
+    isObject(message) && message.type === 'xrawl/set-context-storage' && typeof message.enabled === 'boolean'
+  );
 }
 
 export function isUpgradePurchaseRequest(message: unknown): message is UpgradePurchaseRequest {

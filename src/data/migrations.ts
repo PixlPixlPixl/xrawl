@@ -11,6 +11,7 @@
  * actually breaks users.
  */
 import { SPECIES, getSpecies } from '@/creature/species';
+import { siteHost } from './observation';
 import type { CreatureGeneticsRecord } from './schema';
 
 
@@ -156,6 +157,24 @@ const V6_STORES: Record<string, string> = {
   interestOverrides: 'host, updatedAt',
 };
 
+/**
+ * V7 - the feeding log becomes a readable journal.
+ *
+ * `feedingEvents` gains `host` (indexed, so "what did it eat on this site" is a
+ * lookup instead of a scan) and the reward it actually paid (`points`, `xp`).
+ * Rewards are stored with the event because they cannot be recomputed later:
+ * the formula reads the state *before* the feeding, and replaying the log in a
+ * different order would produce different totals.
+ *
+ * The upgrader derives `host` from the stored URL and leaves rewards at 0, which
+ * the journal renders as "not recorded" rather than inventing a number.
+ */
+const V7_STORES: Record<string, string> = {
+  ...V6_STORES,
+  feedingEvents:
+    'id, eatenAt, word, creatureId, environment, host, [creatureId+eatenAt], [word+eatenAt], [host+eatenAt]',
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   {
     version: 1,
@@ -261,6 +280,24 @@ export const MIGRATIONS: readonly Migration[] = [
       await progression.toCollection().modify((row) => {
         row.interests ??= {};
         row.interestsUpdatedAt ??= 0;
+      });
+    },
+  },
+  {
+    version: 7,
+    description: 'Feeding log is a journal: host index plus the reward each feeding paid',
+    stores: V7_STORES,
+    async upgrade({ table }) {
+      const feedingEvents = table('feedingEvents') as import('dexie').Table<
+        Record<string, unknown>,
+        string
+      >;
+      await feedingEvents.toCollection().modify((row) => {
+        const url = typeof row.pageUrl === 'string' ? row.pageUrl : '';
+        row.host ??= siteHost(url);
+        row.points ??= 0;
+        row.xp ??= 0;
+        row.source ??= 'autonomous';
       });
     },
   },

@@ -11,6 +11,15 @@ export const XRAWL_CONFIG = {
   creatureModeStorageKey: 'xrawl.creature.mode',
   /** Persisted companion trailing distance, in CSS px. */
   companionTrailingStorageKey: 'xrawl.creature.trailing',
+  journal: {
+    /**
+     * Whether feeding events keep the sentence they happened in. Off by default:
+     * the vector is built from the sentence in memory either way, and storing
+     * page text turns the feeding log into a copy of what the user read.
+     */
+    storeContextStorageKey: 'xrawl.journal.storeContext',
+  },
+
   /** Hotkey that toggles the manual feeding selection mode. */
   feedingModeHotkey: { alt: true, shift: true, code: 'KeyF' },
   /** Hotkey that toggles the gameplay mode. */

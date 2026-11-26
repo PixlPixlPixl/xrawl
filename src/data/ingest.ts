@@ -131,7 +131,20 @@ export async function ingestObservation(
  * `title` is truncated because it is page-controlled text. The event id is
  * content-derived, so a retried delivery is detected and rewarded exactly once.
  */
-export async function ingestFeeding(db: XrawlDatabase, raw: FeedingPayload): Promise<boolean> {
+export interface IngestFeedingOptions {
+  /**
+   * Store the sentence the word was eaten in. Off by default: it is page text,
+   * and cognition only needs it *in memory* to build the contextual vector. The
+   * hash is always kept, because it is what dedupes that vector in the cache.
+   */
+  readonly storeContext?: boolean;
+}
+
+export async function ingestFeeding(
+  db: XrawlDatabase,
+  raw: FeedingPayload,
+  options: IngestFeedingOptions = {},
+): Promise<boolean> {
   if (typeof raw.word !== 'string' || !isValidWord(raw.word)) return false;
 
   const sentence = raw.contextSentence.slice(0, OBSERVATION_LIMITS.maxSentenceLength);
@@ -144,7 +157,7 @@ export async function ingestFeeding(db: XrawlDatabase, raw: FeedingPayload): Pro
     environment: raw.environment,
     pageUrl: raw.pageUrl.slice(0, 2_000),
     pageTitle: raw.pageTitle.slice(0, 500),
-    contextSentence: sentence,
+    contextSentence: options.storeContext === true ? sentence : '',
     contextHash,
     fingerprint: raw.fingerprint,
     source: raw.source === 'manual' ? 'manual' : 'autonomous',
@@ -160,8 +173,8 @@ export async function ingestFeeding(db: XrawlDatabase, raw: FeedingPayload): Pro
     async () => {
       if (await db.feedingEvents.get(event.id)) return;
 
-      await db.feedingEvents.put(event);
-
+      // Reading the vocabulary row first is what tells the award whether this
+      // feeding is a discovery, so it has to happen before the counter moves.
       const previous = await db.vocabulary.get(raw.word);
       const priorEats = previous?.timesEaten ?? 0;
 
@@ -169,13 +182,21 @@ export async function ingestFeeding(db: XrawlDatabase, raw: FeedingPayload): Pro
       await startSession(db, raw.sessionId, raw.eatenAt);
       await recordSessionActivity(db, raw.sessionId, { feedingCount: 1 }, raw.eatenAt);
 
-      await awardFeeding(db, {
+      const reward = await awardFeeding(db, {
         word: raw.word,
         environment: raw.environment,
         isNewDiscovery: priorEats === 0,
         priorEats,
         creatureId: raw.creatureId,
         now: raw.eatenAt,
+      });
+
+      // Written last so the row carries what it actually paid. A failure above
+      // rolls back the whole transaction: no event without its reward.
+      await db.feedingEvents.put({
+        ...event,
+        xp: reward.breakdown.xp,
+        points: reward.breakdown.wordPoints,
       });
     },
   );

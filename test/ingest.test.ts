@@ -172,23 +172,49 @@ describe('ingestFeeding', () => {
 
   it('truncates page-controlled text to bounded lengths', async () => {
     const db = await open();
+    await ingestFeeding(
+      db,
+      {
+        sessionId: 's',
+        creatureId: 'xrawl-0',
+        word: 'fox',
+        eatenAt: nowAt(0),
+        environment: 'article',
+        pageUrl: `https://example.com/${'a'.repeat(3_000)}`,
+        pageTitle: 'b'.repeat(1_000),
+        contextSentence: 'c'.repeat(1_000),
+        fingerprint: 'fp',
+        nutrition: 1,
+        preferenceDelta: 0,
+      },
+      { storeContext: true },
+    );
+
+    const event = await db.feedingEvents.orderBy('eatenAt').last();
+    expect(event!.pageUrl.length).toBeLessThanOrEqual(2_000);
+    expect(event!.pageTitle.length).toBeLessThanOrEqual(500);
+    expect(event!.contextSentence.length).toBe(OBSERVATION_LIMITS.maxSentenceLength);
+  });
+
+  it('discards the sentence unless context storage is on', async () => {
+    const db = await open();
     await ingestFeeding(db, {
       sessionId: 's',
       creatureId: 'xrawl-0',
       word: 'fox',
       eatenAt: nowAt(0),
       environment: 'article',
-      pageUrl: `https://example.com/${'a'.repeat(3_000)}`,
-      pageTitle: 'b'.repeat(1_000),
-      contextSentence: 'c'.repeat(1_000),
+      pageUrl: 'https://example.com/a',
+      pageTitle: 't',
+      contextSentence: 'a private sentence',
       fingerprint: 'fp',
       nutrition: 1,
       preferenceDelta: 0,
     });
 
     const event = await db.feedingEvents.orderBy('eatenAt').last();
-    expect(event!.pageUrl.length).toBeLessThanOrEqual(2_000);
-    expect(event!.pageTitle.length).toBeLessThanOrEqual(500);
-    expect(event!.contextSentence.length).toBe(OBSERVATION_LIMITS.maxSentenceLength);
+    expect(event!.contextSentence).toBe('');
+    // The hash survives: it keys the contextual vector in the embedding cache.
+    expect(event!.contextHash.length).toBeGreaterThan(0);
   });
 });

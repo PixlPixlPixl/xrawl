@@ -395,6 +395,8 @@ DevTools to add/remove a paragraph; hover words to inspect targets.
 | popup → background | `xrawl/db-status` | schema version, counts, storage, progression, model state |
 | popup → background | `xrawl/db-export` | whole-database JSON envelope |
 | popup → background | `xrawl/db-import` | replace tables from an export envelope |
+| journal → background | `xrawl/journal` | overview, feedings, vocabulary, word detail |
+| journal → background | `xrawl/set-context-storage` | opt in/out of storing the sentence a word was eaten in |
 
 All shapes and guards live in `src/shared/types/messaging.ts`. Persistence
 messages are validated there before the background touches the database; the
@@ -413,13 +415,13 @@ content script ──xrawl/observe──▶ background ──▶ DatabaseService
                 ──xrawl/feed────▶             (lazy open, single instance)
 ```
 
-### Tables (v6)
+### Tables (v7)
 
 | Table | Key | Purpose |
 | --- | --- | --- |
 | `creatures` | `id` | Genetics input + live state; appearance/attributes are derived |
 | `vocabulary` | `word` | Per-word seen/eaten counters and first/last timestamps |
-| `feedingEvents` | `id` | Immutable log; one row per individual eating event |
+| `feedingEvents` | `id` | Immutable log; one row per eating event, with host and the reward it paid |
 | `environments` | `kind:host` | Accumulated exposure, visits, word volume |
 | `sessions` | `id` | Visible browse time, page visits, feedings |
 | `upgrades` | `id` | Purchased upgrades with level and spend |
@@ -439,8 +441,11 @@ Design notes that matter later:
 - **Embeddings are keyed by model + dimension + source hash.** Swapping models
   writes new rows and leaves the old ones intact for comparison or pruning.
 - **Compound indexes** (`[creatureId+eatenAt]`, `[word+eatenAt]`,
-  `[model+subjectType+subjectId]`, `[kind+updatedAt]`) cover the queries
-  progression and cognition will actually run.
+  `[host+eatenAt]`, `[model+subjectType+subjectId]`, `[kind+updatedAt]`) cover
+  the queries progression, cognition and the journal actually run.
+- **Rewards are journaled, not derived later.** `feedingEvents.points` / `xp` are
+  written in the same transaction as the award, because the formula scores the
+  state *before* the feeding and a replay would disagree.
 
 ### Migration rules
 
@@ -477,6 +482,70 @@ IndexedDB survives extension updates but not eviction or uninstall:
 `browser.storage.local` remains reserved for lightweight settings (the overlay
 toggle); game history belongs in the database.
 
+## Journal
+
+The popup's **Journal** button opens a full page (`journal.html`) that reads the
+history tables and renders them. It is the first screen that answers "is the
+creature eating the right words?" without reading a database dump.
+
+### Overview
+
+Cards for words consumed (with how many were manual), unique vocabulary (eaten
+words, against every word ever seen), level with an XP bar, the word-point
+balance, feedings per focused minute, and when the first feeding happened. Below
+them, the sites the creature has actually lived in, ranked by focused exposure
+with each site's share of total time.
+
+Words per minute is the one derived number here: feedings divided by the
+*visible, focused* time recorded in `sessions`, so a tab left open in the
+background cannot make the creature look lazy.
+
+### Feeding history
+
+One row per event: **Word**, **Time** (local clock plus a today/yesterday/date
+label), **Source** (the site host), **Page** (title, linking to the URL), **Type**
+(manual or autonomous, plus the page kind), and **Reward** in word points with
+the XP it also paid.
+
+Rewards are stored on the event, not recomputed: the formula reads the state
+*before* a feeding, so replaying an old event in a new order would pay a
+different number. Rows written before schema v7 show "-" rather than a
+fabricated value. Filters are chips for manual/autonomous and a search box that
+treats anything containing a dot as a site and anything else as a word.
+
+### Vocabulary
+
+Browse every discovered word, sorted by times eaten (default), last seen, or
+alphabetically, with an "eaten only" filter. The search box accepts either a
+word prefix or a site: `github.com` lists what was eaten there, in the chosen
+order.
+
+Clicking a word opens a detail panel with its first/last sighting and first/last
+eating times, the environments it was seen in, the sites it was eaten on
+(clicking one filters the history), its recent feedings, and its **related
+words**:
+
+- with a model, the eight nearest cached word vectors by cosine similarity in
+  the creature's *current* model space (the highest-weight profile names it);
+- without one, the words eaten most often on the same sites.
+
+Only the 600 most-eaten words are compared, so opening the journal stays a
+screenful of work. Neighbours below 0.2 similarity are dropped rather than
+listed as "related" for merely being co-cached.
+
+### What is stored, and what is not
+
+- **Sites, titles and timestamps, never coordinates.** A stored rect stops
+  meaning anything once the page reflows; a URL and a title do not.
+- **Context sentences are opt-in** (Overview -> *Page context*). Off by default:
+  cognition embeds the sentence in memory at learn time and the passage is
+  discarded, leaving only its hash (which keys the vector cache). Turning it on
+  stores the truncated sentence and lists it in the word detail.
+- **Hosts are canonical**: lowercase, no `www.`, no port or path, so a site is
+  one site whichever way it was reached.
+
+The journal page only sends `xrawl/journal` reads and the context-storage
+preference; it can never write game history.
 ## Progression
 
 Progression is **fully deterministic**: no model, no randomness, no clock in the

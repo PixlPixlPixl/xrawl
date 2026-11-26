@@ -80,3 +80,14 @@ export function hostOf(url: string): string {
     return 'unknown';
   }
 }
+
+/**
+ * Host as the journal stores and searches it: no `www.`.
+ *
+ * One canonical form is what makes "everything eaten on github.com" find rows
+ * whether the page was reached with a `www` or not.
+ */
+export function siteHost(url: string): string {
+  const host = hostOf(url);
+  return host.startsWith('www.') ? host.slice('www.'.length) : host;
+}

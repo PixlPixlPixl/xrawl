@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Xrawl journal</title>
+  </head>
+  <body>
+    <main class="app">
+      <header class="head">
+        <div>
+          <div class="brand">xrawl <span class="brand-sub">journal</span></div>
+          <div class="creature-line" id="creature-line">loading…</div>
+        </div>
+        <nav class="tabs" role="tablist" aria-label="Journal sections">
+          <button id="tab-overview" class="tab" type="button" role="tab" data-on="true">Overview</button>
+          <button id="tab-feedings" class="tab" type="button" role="tab">Feeding history</button>
+          <button id="tab-vocabulary" class="tab" type="button" role="tab">Vocabulary</button>
+        </nav>
+      </header>
+
+      <section id="view-overview" class="view" aria-label="Overview">
+        <div class="cards" id="overview-cards"></div>
+        <div class="panel">
+          <h2>Where the creature lives</h2>
+          <div id="overview-environments"></div>
+        </div>
+        <div class="panel">
+          <h2>Page context</h2>
+          <label class="switch">
+            <input id="context-storage" type="checkbox" />
+            <span>Store the sentence a word was eaten in</span>
+          </label>
+          <p class="hint" id="context-hint"></p>
+        </div>
+      </section>
+
+      <section id="view-feedings" class="view" hidden aria-label="Feeding history">
+        <div class="toolbar">
+          <div class="chips" id="source-chips" role="group" aria-label="Feeding source">
+            <button class="chip" type="button" data-source="all" data-on="true">All</button>
+            <button class="chip" type="button" data-source="manual">Manual</button>
+            <button class="chip" type="button" data-source="autonomous">Autonomous</button>
+          </div>
+          <input id="feedings-search" type="search" placeholder="word or site (example.com)" aria-label="Filter history by word or site" />
+          <span class="count" id="feedings-count"></span>
+        </div>
+        <table class="journal">
+          <thead>
+            <tr>
+              <th scope="col">Word</th>
+              <th scope="col">Time</th>
+              <th scope="col">Source</th>
+              <th scope="col">Page</th>
+              <th scope="col">Type</th>
+              <th scope="col" class="num">Reward</th>
+            </tr>
+          </thead>
+          <tbody id="feedings-body"></tbody>
+        </table>
+        <div class="empty" id="feedings-empty" hidden>Nothing eaten yet. Wander a page and let the creature hunt.</div>
+        <button id="feedings-more" class="more" type="button" hidden>Load more</button>
+      </section>
+
+      <section id="view-vocabulary" class="view" hidden aria-label="Vocabulary">
+        <div class="toolbar">
+          <input id="vocab-search" type="search" placeholder="search a word or a site (github.com)" aria-label="Search vocabulary" />
+          <select id="vocab-sort" aria-label="Vocabulary order">
+            <option value="eaten">Most eaten</option>
+            <option value="recent">Recently seen</option>
+            <option value="alpha">A–Z</option>
+          </select>
+          <label class="switch">
+            <input id="vocab-eaten" type="checkbox" />
+            <span>eaten only</span>
+          </label>
+          <span class="count" id="vocab-count"></span>
+        </div>
+        <div class="vocab-split">
+          <ul id="vocab-list" class="vocab-list"></ul>
+          <aside id="word-detail" class="detail" hidden></aside>
+        </div>
+        <div class="empty" id="vocab-empty" hidden>No words recorded yet.</div>
+        <button id="vocab-more" class="more" type="button" hidden>Load more</button>
+      </section>
+
+      <footer class="foot">
+        Times are local · entries point at sites and pages, not coordinates · context sentences are only stored if you turn them on
+      </footer>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
