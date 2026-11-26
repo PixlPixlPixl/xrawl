@@ -21,16 +21,58 @@ import type { FeedingPayload, ObservationPayload } from './observation';
 import { getSpecies, resolveGenetics } from '@/creature/species';
 import { resolveLoadout } from '@/creature/loadout';
 import { listUpgrades } from './repositories/upgrade-repository';
+import { upgradeStatuses, purchaseUpgradeWithPoints, type PurchaseOutcome, type UpgradeStatus } from './progression';
+import { getProgression } from './repositories/progression-repository';
+import { levelProgress } from '@/progression/level';
+import { describeAffinities } from '@/progression/affinity';
 import { getCreature } from './repositories/creature-repository';
 import type { CreatureLoadoutSnapshot as SharedCreatureLoadout } from '@/shared/types/creature';
 import { CREATURE_ID, ensureCreature } from './repositories/creature-repository';
 import { countFeedingEvents } from './repositories/feeding-repository';
 import { countVocabulary } from './repositories/vocabulary-repository';
+import { summarizeInterestProfiles } from './repositories/interest-profile-repository';
+import {
+  evolveFromExposure,
+  evolveFromFeeding,
+  prioritizeWords,
+  type CognitionSnapshot,
+  type PriorityRequest,
+  type WordPriority,
+} from './cognition';
+import { countEmbeddings } from './embeddings';
+import {
+  createSemanticService,
+  type SemanticService,
+  type SemanticState,
+} from '@/semantics/service';
 import {
   requestPersistentStorage,
   storageEstimate,
   type StorageEstimate,
 } from './resilience';
+
+export interface ProgressionStatus {
+  readonly level: number;
+  readonly xp: number;
+  /** XP still needed for the next level; 0 at the cap. */
+  readonly xpForNextLevel: number;
+  readonly wordPoints: number;
+  readonly lifetimeWordPoints: number;
+  readonly discoveries: number;
+  readonly feedings: number;
+  /** Normalized affinity distribution; sums to 1 (rounded for display). */
+  readonly affinities: Readonly<Partial<Record<string, number>>>;
+}
+
+/** What the popup can say about the model and the learned interests. */
+export interface SemanticStatus {
+  /** `idle`/`loading`/`ready`/`fallback`; loading is lazy and on first use. */
+  readonly state: SemanticState;
+  readonly model: string;
+  /** Rounded attention shares, biggest first. Empty until something is eaten. */
+  readonly profiles: ReadonlyArray<{ readonly category: string; readonly share: number }>;
+  readonly embeddingCount: number;
+}
 
 export interface DatabaseStatus {
   readonly schemaVersion: number;
@@ -38,6 +80,10 @@ export interface DatabaseStatus {
   readonly vocabularyCount: number;
   readonly feedingCount: number;
   readonly storage: StorageEstimate | null;
+  readonly progression: ProgressionStatus;
+  /** Catalog with owned levels and current prices, for a shop UI. */
+  readonly upgrades: readonly UpgradeStatus[];
+  readonly semantics: SemanticStatus;
 }
 
 /** What the content script needs to build the creature it renders. */
@@ -51,6 +97,8 @@ export interface DatabaseServiceOptions extends XrawlDbOptions {
   readonly speciesId?: string;
   /** Host hook fired once the store opens (e.g. an eviction-aid marker). */
   readonly onOpened?: (now: number) => void;
+  /** Embedding backend; injected by tests, lazily loads MiniLM in production. */
+  readonly semantics?: SemanticService;
 }
 
 export interface DatabaseService {
@@ -58,6 +106,16 @@ export interface DatabaseService {
   ingestObservation(payload: ObservationPayload): Promise<IngestResult>;
   ingestFeeding(payload: FeedingPayload): Promise<boolean>;
   creatureLoadout(): Promise<CreatureLoadoutSnapshot | null>;
+  purchaseUpgrade(upgradeId: string): Promise<PurchaseOutcome>;
+  /** Learn from a feeding; safe to call after the transaction has committed. */
+  learnFromFeeding(payload: FeedingPayload): Promise<CognitionSnapshot>;
+  /** Learn from accumulated time in an environment (whole steps only). */
+  learnFromExposure(environment: string, host: string, steps: number): Promise<CognitionSnapshot>;
+  /** Rank candidate words for the content script's creature, with the model used. */
+  prioritize(requests: readonly PriorityRequest[]): Promise<{
+    readonly model: string;
+    readonly priorities: readonly WordPriority[];
+  }>;
   exportAll(options?: { excludeEmbeddings?: boolean }): Promise<XrawlExportEnvelope>;
   importAll(envelope: unknown): Promise<ImportResult>;
   close(): Promise<void>;
@@ -65,6 +123,16 @@ export interface DatabaseService {
 
 export function createDatabaseService(options: DatabaseServiceOptions): DatabaseService {
   let pending: Promise<XrawlDatabase> | null = null;
+
+  // Created eagerly (cheap) but the model behind it is loaded lazily, on the
+  // first embedding request - never at extension startup.
+  const semantics: SemanticService =
+    options.semantics ??
+    createSemanticService({
+      logger: (message, error) => {
+        console.warn('[xrawl] ' + message, error ?? '');
+      },
+    });
 
   const open = (): Promise<XrawlDatabase> => {
     if (pending) return pending;
@@ -103,17 +171,43 @@ export function createDatabaseService(options: DatabaseServiceOptions): Database
   return {
     async status() {
       const db = await open();
-      const [vocabularyCount, feedingCount, storage] = await Promise.all([
-        countVocabulary(db),
-        countFeedingEvents(db),
-        storageEstimate(),
-      ]);
+      const [vocabularyCount, feedingCount, storage, progression, upgrades, profiles, embeddingCount] =
+        await Promise.all([
+          countVocabulary(db),
+          countFeedingEvents(db),
+          storageEstimate(),
+          getProgression(db, CREATURE_ID),
+          upgradeStatuses(db),
+          summarizeInterestProfiles(db),
+          countEmbeddings(db),
+        ]);
+
+      const xp = progression?.xp ?? 0;
+      const progress = levelProgress(xp);
+
       return {
         schemaVersion: db.verno,
         creatureId: CREATURE_ID,
         vocabularyCount,
         feedingCount,
         storage,
+        progression: {
+          level: progress.level,
+          xp,
+          xpForNextLevel: progress.xpForNextLevel,
+          wordPoints: progression?.wordPoints ?? 0,
+          lifetimeWordPoints: progression?.lifetimeWordPoints ?? 0,
+          discoveries: progression?.discoveries ?? 0,
+          feedings: progression?.feedings ?? 0,
+          affinities: describeAffinities(progression?.affinities ?? {}),
+        },
+        upgrades,
+        semantics: {
+          state: semantics.state(),
+          model: semantics.model(),
+          profiles,
+          embeddingCount,
+        },
       };
     },
 
@@ -123,6 +217,31 @@ export function createDatabaseService(options: DatabaseServiceOptions): Database
 
     async ingestFeeding(payload) {
       return ingestFeeding(await open(), payload);
+    },
+
+    async learnFromFeeding(payload) {
+      const db = await open();
+      const provider = await semantics.prepare();
+      return evolveFromFeeding(db, provider, {
+        word: payload.word,
+        sentence: payload.contextSentence,
+        environment: payload.environment,
+        source: payload.source === 'manual' ? 'manual' : 'autonomous',
+        now: payload.eatenAt,
+      });
+    },
+
+    async learnFromExposure(environment, host, steps) {
+      const db = await open();
+      const provider = await semantics.prepare();
+      return evolveFromExposure(db, provider, { environment, host, steps, now: Date.now() });
+    },
+
+    async prioritize(requests) {
+      const db = await open();
+      const provider = await semantics.prepare();
+      const priorities = await prioritizeWords(db, provider, requests, { now: Date.now() });
+      return { model: provider.model, priorities };
     },
 
     async creatureLoadout() {
@@ -146,6 +265,10 @@ export function createDatabaseService(options: DatabaseServiceOptions): Database
         appearance: loadout.appearance,
         attributes: loadout.attributes,
       };
+    },
+
+    async purchaseUpgrade(upgradeId) {
+      return purchaseUpgradeWithPoints(await open(), upgradeId, Date.now());
     },
 
     async exportAll({ excludeEmbeddings = true } = {}) {

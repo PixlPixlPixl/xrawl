@@ -17,6 +17,13 @@ export interface ForageTarget {
   readonly length: number;
   /** 0..1 — rarer words are more interesting. */
   readonly interest: number;
+  /**
+   * 0..1 learned hunting priority: interest relevance, novelty and a
+   * deterministic exploration boost. Until the background has scored this word
+   * it falls back to `interest`, so a creature with no learned profile still
+   * forages sensibly.
+   */
+  readonly priority: number;
   /** `WordTarget.fingerprint`, carried through to feeding events. */
   readonly fingerprint: string;
   readonly contextSentence: string;
@@ -27,6 +34,8 @@ export interface ForageFilter {
   readonly maximumWordLength: number;
   /** Hard cap on candidates handed to the engine; nearest/rarest kept. */
   readonly maxCandidates?: number;
+  /** Learned priorities by normalized word, from the background. */
+  readonly priorities?: ReadonlyMap<string, number>;
 }
 
 /**
@@ -60,12 +69,14 @@ export function buildForageTargets(
     }
 
     const frequency = counts.get(target.normalized) ?? 1;
+    const interest = Math.min(1, 1 / frequency);
     candidates.push({
       id: target.id,
       word: target.normalized,
       point: { x: anchor.x + anchor.width / 2, y: anchor.y + anchor.height / 2 },
       length: target.normalized.length,
-      interest: Math.min(1, 1 / frequency),
+      interest,
+      priority: filter.priorities?.get(target.normalized) ?? interest,
       fingerprint: target.fingerprint,
       contextSentence: target.context.sentence,
       environment: target.environment,
@@ -79,21 +90,36 @@ export function buildForageTargets(
   return candidates.sort((a, b) => b.interest - a.interest).slice(0, cap);
 }
 
-/** Nearest eligible target within `radius` of `origin`. */
-export function findNearestTarget(
+/**
+ * Best target within `radius`: interesting *and* close, not one or the other.
+ *
+ * Proximity is a quarter of the score, priority three quarters, so a favourite
+ * subject is worth walking to - but a dull word under the creature's nose still
+ * beats an irrelevant one across the page. Ties keep scan order, so the choice
+ * is deterministic.
+ */
+export function findBestTarget(
   targets: readonly ForageTarget[],
   origin: Point,
   radius: number,
 ): { target: ForageTarget; distance: number } | null {
   let best: ForageTarget | null = null;
+  let bestScore = -Infinity;
   let bestDistance = Infinity;
 
   for (const target of targets) {
     const distance = Math.hypot(target.point.x - origin.x, target.point.y - origin.y);
-    if (distance > radius || distance >= bestDistance) continue;
-    best = target;
-    bestDistance = distance;
+    if (distance > radius) continue;
+
+    const proximity = Number.isFinite(radius) ? Math.max(0, 1 - distance / radius) : 1;
+    const score = target.priority * 0.75 + proximity * 0.25;
+    if (score > bestScore) {
+      best = target;
+      bestScore = score;
+      bestDistance = distance;
+    }
   }
 
   return best === null ? null : { target: best, distance: bestDistance };
 }
+

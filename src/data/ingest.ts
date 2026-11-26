@@ -16,7 +16,8 @@ import {
   type ObservationPayload,
   type WordSightingPayload,
 } from './observation';
-import { appendFeedingEvent } from './repositories/feeding-repository';
+import { buildFeedingEvent } from './repositories/feeding-repository';
+import { awardFeeding } from './progression';
 import { recordEnvironmentExposure } from './repositories/environment-repository';
 import { recordSessionActivity, startSession } from './repositories/session-repository';
 import { recordWordEaten, recordWordSightings } from './repositories/vocabulary-repository';
@@ -25,6 +26,13 @@ export interface IngestResult {
   readonly sessionId: string;
   readonly wordsWritten: number;
   readonly activeMs: number;
+  /**
+   * Whole exposure steps this flush crossed in its environment (see
+   * `OBSERVATION_LIMITS.exposureStepMs`). Derived from persisted session time, so
+   * environment learning is reproducible from the observation log rather than
+   * from an in-memory timer.
+   */
+  readonly exposureSteps: number;
 }
 
 /** Defensive normalization: the content script is not a trusted source. */
@@ -57,11 +65,16 @@ export async function ingestObservation(
 ): Promise<IngestResult> {
   const payload = sanitizeObservation(raw);
 
+  let exposureSteps = 0;
+
   await db.transaction(
     'rw',
     [db.sessions, db.vocabulary, db.environments],
     async () => {
       await startSession(db, payload.sessionId, payload.capturedAt);
+
+      const before = await db.sessions.get(payload.sessionId);
+      const beforeMs = before?.environments[payload.environment] ?? 0;
 
       if (payload.words.length > 0) {
         await recordWordSightings(db, payload.words, payload.environment, payload.capturedAt);
@@ -92,6 +105,13 @@ export async function ingestObservation(
         },
         payload.capturedAt,
       );
+
+      const stepMs = OBSERVATION_LIMITS.exposureStepMs;
+      const afterMs = beforeMs + payload.activeMs;
+      exposureSteps = Math.max(
+        0,
+        Math.floor(afterMs / stepMs) - Math.floor(beforeMs / stepMs),
+      );
     },
   );
 
@@ -99,12 +119,17 @@ export async function ingestObservation(
     sessionId: payload.sessionId,
     wordsWritten: payload.words.length,
     activeMs: payload.activeMs,
+    exposureSteps,
   };
 }
 
 /**
- * Records one feeding event and its denormalized vocabulary counter in the same
- * transaction. `title` is truncated because it is page-controlled text.
+ * Records one feeding event, its denormalized vocabulary counter, and the
+ * progression reward it earns - all in one transaction, so XP, word points and
+ * the event that explains them can never disagree.
+ *
+ * `title` is truncated because it is page-controlled text. The event id is
+ * content-derived, so a retried delivery is detected and rewarded exactly once.
  */
 export async function ingestFeeding(db: XrawlDatabase, raw: FeedingPayload): Promise<boolean> {
   if (typeof raw.word !== 'string' || !isValidWord(raw.word)) return false;
@@ -112,24 +137,48 @@ export async function ingestFeeding(db: XrawlDatabase, raw: FeedingPayload): Pro
   const sentence = raw.contextSentence.slice(0, OBSERVATION_LIMITS.maxSentenceLength);
   const contextHash = stableKey('context', sentence);
 
-  await db.transaction('rw', [db.feedingEvents, db.vocabulary, db.sessions], async () => {
-    await appendFeedingEvent(db, {
-      creatureId: raw.creatureId,
-      word: raw.word,
-      eatenAt: raw.eatenAt,
-      environment: raw.environment,
-      pageUrl: raw.pageUrl.slice(0, 2_000),
-      pageTitle: raw.pageTitle.slice(0, 500),
-      contextSentence: sentence,
-      contextHash,
-      fingerprint: raw.fingerprint,
-      nutrition: Number.isFinite(raw.nutrition) ? raw.nutrition : 0,
-      preferenceDelta: Number.isFinite(raw.preferenceDelta) ? raw.preferenceDelta : 0,
-    });
-    await recordWordEaten(db, raw.word, raw.environment, raw.eatenAt);
-    await startSession(db, raw.sessionId, raw.eatenAt);
-    await recordSessionActivity(db, raw.sessionId, { feedingCount: 1 }, raw.eatenAt);
+  const event = buildFeedingEvent({
+    creatureId: raw.creatureId,
+    word: raw.word,
+    eatenAt: raw.eatenAt,
+    environment: raw.environment,
+    pageUrl: raw.pageUrl.slice(0, 2_000),
+    pageTitle: raw.pageTitle.slice(0, 500),
+    contextSentence: sentence,
+    contextHash,
+    fingerprint: raw.fingerprint,
+    source: raw.source === 'manual' ? 'manual' : 'autonomous',
+    nutrition: Number.isFinite(raw.nutrition) ? raw.nutrition : 0,
+    preferenceDelta: Number.isFinite(raw.preferenceDelta) ? raw.preferenceDelta : 0,
   });
+
+  // Progression reads the vocabulary row to know whether this is a discovery,
+  // so vocabulary must be in scope along with the tables it writes.
+  await db.transaction(
+    'rw',
+    [db.feedingEvents, db.vocabulary, db.sessions, db.progression, db.creatures, db.personality],
+    async () => {
+      if (await db.feedingEvents.get(event.id)) return;
+
+      await db.feedingEvents.put(event);
+
+      const previous = await db.vocabulary.get(raw.word);
+      const priorEats = previous?.timesEaten ?? 0;
+
+      await recordWordEaten(db, raw.word, raw.environment, raw.eatenAt);
+      await startSession(db, raw.sessionId, raw.eatenAt);
+      await recordSessionActivity(db, raw.sessionId, { feedingCount: 1 }, raw.eatenAt);
+
+      await awardFeeding(db, {
+        word: raw.word,
+        environment: raw.environment,
+        isNewDiscovery: priorEats === 0,
+        priorEats,
+        creatureId: raw.creatureId,
+        now: raw.eatenAt,
+      });
+    },
+  );
 
   return true;
 }

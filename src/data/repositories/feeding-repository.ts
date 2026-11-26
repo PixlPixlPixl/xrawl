@@ -2,6 +2,7 @@ import type { EnvironmentKind } from '@/shared/types/page';
 import { stableKey } from '@/shared/id';
 import type { XrawlDatabase } from '../db';
 import type { FeedingEventRecord } from '../schema';
+import type { FeedingSource } from '../observation';
 
 export interface FeedingEventInput {
   readonly id?: string;
@@ -14,6 +15,7 @@ export interface FeedingEventInput {
   readonly contextSentence: string;
   readonly contextHash: string;
   readonly fingerprint: string;
+  readonly source?: FeedingSource;
   readonly nutrition: number;
   readonly preferenceDelta: number;
 }
@@ -39,6 +41,7 @@ export function buildFeedingEvent(input: FeedingEventInput): FeedingEventRecord 
     contextSentence: input.contextSentence,
     contextHash: input.contextHash,
     fingerprint: input.fingerprint,
+    source: input.source ?? 'autonomous',
     nutrition: input.nutrition,
     preferenceDelta: input.preferenceDelta,
   };

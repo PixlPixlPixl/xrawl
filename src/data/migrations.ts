@@ -12,7 +12,7 @@
  */
 import { SPECIES, getSpecies } from '@/creature/species';
 import type { CreatureGeneticsRecord } from './schema';
-import { XRAWL_TABLE_SCHEMAS } from './schema';
+
 
 export interface Migration {
   readonly version: number;
@@ -26,9 +26,23 @@ export interface Migration {
   readonly upgrade?: (tx: { table: (name: string) => unknown }) => Promise<void>;
 }
 
-/** Bookkeeping table: not game data, present from v1 so migrations have a home. */
+/**
+ * Bookkeeping table: not game data, present from v1 so migrations have a home.
+ *
+ * The v1 store map is written out in full instead of spread from
+ * `XRAWL_TABLE_SCHEMAS`: that constant keeps growing, and a v1 database must
+ * keep opening with exactly the tables v1 shipped with. New tables belong to a
+ * new version entry.
+ */
 const V1_STORES: Record<string, string> = {
-  ...XRAWL_TABLE_SCHEMAS,
+  creatures: 'id, bornAt, updatedAt, stage',
+  vocabulary: 'word, timesSeen, timesEaten, firstSeenAt, lastSeenAt, firstEatenAt, lastEatenAt',
+  feedingEvents: 'id, eatenAt, word, creatureId, environment, [creatureId+eatenAt], [word+eatenAt]',
+  environments: 'id, kind, exposureMs, lastExposedAt',
+  sessions: 'id, startedAt, lastActiveAt, endedAt',
+  upgrades: 'id, purchasedAt, updatedAt',
+  personality: 'id, kind, updatedAt, [kind+updatedAt]',
+  embeddings: 'id, model, subjectType, subjectId, sourceHash, updatedAt, [model+subjectType+subjectId]',
   meta: 'key',
 };
 
@@ -85,6 +99,47 @@ export function geneticsFromLegacy(row: LegacyCreatureRow): CreatureGeneticsReco
   };
 }
 
+/**
+ * V3 - progression: XP, levels, word points, and the history the reward
+ * formula scores against (feeding counts per environment).
+ *
+ * Existing creatures get an empty row rather than a retroactive payout: the
+ * feeding log is intact, but awarding past events would make the totals inside
+ * this migration depend on the order a user happened to browse in. Rewards
+ * start accruing from this version forward.
+ */
+const V3_STORES: Record<string, string> = {
+  ...V2_STORES,
+  progression: 'id, updatedAt, level',
+};
+
+/**
+ * V4 - environment affinity becomes one normalized distribution over every
+ * environment kind (a shared 100% pool) instead of an independent "share of
+ * lifetime feedings" computed per environment.
+ *
+ * No index changes; the upgrader seeds each row's distribution from the feeding
+ * counts v3 already recorded, so an existing creature keeps the affinity its
+ * history implies instead of starting from zero.
+ */
+const V4_STORES: Record<string, string> = { ...V3_STORES };
+
+/**
+ * V5 - learned interest profiles get their own table.
+ *
+ * A profile is a vector plus its share of the attention pool, which is a
+ * different thing from a cached embedding: caches are keyed by content and can
+ * be thrown away, profiles are the creature's memory. Splitting them means
+ * clearing an embedding cache never forgets what the creature likes.
+ *
+ * No upgrader: a v4 world has no profiles yet, so the first semantic pass builds
+ * them from its established interests and accumulates from there.
+ */
+const V5_STORES: Record<string, string> = {
+  ...V4_STORES,
+  interestProfiles: 'id, category, weight, updatedAt',
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   {
     version: 1,
@@ -111,6 +166,72 @@ export const MIGRATIONS: readonly Migration[] = [
         delete (legacy as { attributes?: unknown }).attributes;
       });
     },
+  },
+  {
+    version: 3,
+    description: 'Progression: XP, level, word points, and per-environment feeding history',
+    stores: V3_STORES,
+    async upgrade({ table }) {
+      const creatures = table('creatures') as import('dexie').Table<Record<string, unknown>, string>;
+      const progression = table('progression') as import('dexie').Table<
+        Record<string, unknown>,
+        string
+      >;
+      const rows = await creatures.toArray();
+      for (const row of rows) {
+        const id = String(row.id);
+        await progression.put({
+          id,
+          xp: 0,
+          level: 1,
+          wordPoints: 0,
+          lifetimeWordPoints: 0,
+          spentWordPoints: 0,
+          feedings: 0,
+          discoveries: 0,
+          environments: {},
+          updatedAt: typeof row.updatedAt === 'number' ? row.updatedAt : 0,
+        });
+      }
+    },
+  },
+  {
+    version: 4,
+    description: 'Environment affinity is a normalized distribution, seeded from feeding counts',
+    stores: V4_STORES,
+    async upgrade({ table }) {
+      const progression = table('progression') as import('dexie').Table<
+        Record<string, unknown>,
+        string
+      >;
+      const rows = await progression.toArray();
+      for (const row of rows) {
+        const counts = row.environments;
+        const distribution: Record<string, number> = {};
+        let total = 0;
+
+        if (counts && typeof counts === 'object') {
+          for (const [kind, value] of Object.entries(counts as Record<string, unknown>)) {
+            if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) continue;
+            distribution[kind] = value;
+            total += value;
+          }
+        }
+
+        if (total > 0) {
+          for (const kind of Object.keys(distribution)) {
+            distribution[kind] = distribution[kind]! / total;
+          }
+        }
+
+        await progression.put({ ...row, affinities: distribution });
+      }
+    },
+  },
+  {
+    version: 5,
+    description: 'Learned interest profiles (vector + attention share) in their own table',
+    stores: V5_STORES,
   },
 ];
 

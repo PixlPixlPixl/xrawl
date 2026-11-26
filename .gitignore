@@ -6,3 +6,6 @@ node_modules/
 .output/
 *.log
 .test-profile/
+
+# Generated ONNX Runtime Web binaries (scripts/copy-ort-wasm.mjs rebuilds them).
+src/public/ort/

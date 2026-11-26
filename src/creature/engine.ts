@@ -30,7 +30,7 @@ import { GaitController, type BodyTransform } from './movement/gait-controller';
 import { buildPose, type CreaturePose } from './rig/pose';
 import { buildRig, type CreatureRig } from './rig/rig';
 import type { Point } from './rig/fabrik';
-import { findNearestTarget, type ForageTarget } from './targets';
+import { findBestTarget, type ForageTarget } from './targets';
 
 export interface CreatureEngineConfig {
   readonly appearance: CreatureAppearance;
@@ -154,11 +154,11 @@ export class CreatureEngine {
       // creature will also head for the nearest word anywhere on the page —
       // otherwise "foraging" would look identical to idling.
       const radius = this.attributes.detectionRadius * CREATURE_CONFIG.detectionFactor;
-      const nearest = findNearestTarget(edible, this.movement.position, radius);
+      const best = findBestTarget(edible, this.movement.position, radius);
       this.currentTarget =
-        nearest?.target ??
+        best?.target ??
         (this.action === 'foraging'
-          ? findNearestTarget(edible, this.movement.position, Infinity)?.target ?? null
+          ? findBestTarget(edible, this.movement.position, Infinity)?.target ?? null
           : null);
     }
 

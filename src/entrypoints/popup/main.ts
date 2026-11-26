@@ -8,6 +8,7 @@ import type {
   DownloadResult,
   ExportPayload,
   StatusPayload,
+  UpgradePurchasePayload,
 } from '@/shared/types/messaging';
 
 function elementById(id: string): HTMLElement {
@@ -42,9 +43,12 @@ const actionButtons = [toggleButton, rescanButton, copyButton, downloadButton];
 
 const dbVersion = elementById('db-version');
 const dbCounts = elementById('db-counts');
+const dbInterests = elementById('db-interests');
 const dbHint = elementById('db-hint');
 const dbExportButton = buttonById('db-export');
 const dbImportInput = document.getElementById('db-import-input');
+const upgradeList = elementById('upgrade-list');
+const wpBalance = elementById('wp-balance');
 
 let tabId: number | null = null;
 let lastStatus: StatusPayload | null = null;
@@ -266,12 +270,110 @@ function renderDatabaseStatus(status: DatabaseStatusPayload | null): void {
   if (status === null) {
     dbVersion.textContent = '';
     dbCounts.textContent = 'not available';
+    dbInterests.textContent = '';
+    wpBalance.textContent = '';
+    upgradeList.replaceChildren();
     return;
   }
 
+  const { progression } = status;
+  const topAffinity = Object.entries(progression.affinities).sort((left, right) => right[1]! - left[1]!)[0];
+  const affinityText =
+    topAffinity === undefined
+      ? ''
+      : ` \u00b7 ${topAffinity[0]} ${Math.round(topAffinity[1]! * 100)}%`;
+
   dbVersion.textContent = `v${status.schemaVersion}`;
-  dbCounts.textContent = `${status.vocabularyCount} words \u00b7 ${status.feedingCount} feedings`;
+  dbCounts.textContent = `${status.vocabularyCount} words \u00b7 ${status.feedingCount} feedings \u00b7 lv ${progression.level} \u00b7 ${progression.xp} xp${affinityText}`;
+  wpBalance.textContent = `${progression.wordPoints} wp`;
+
+  const semantics = status.semantics;
+  const learnt =
+    semantics.profiles.length > 0
+      ? semantics.profiles
+          .map((profile) => `${profile.category} ${Math.round(profile.share * 100)}%`)
+          .join(' \u00b7 ')
+      : 'nothing yet';
+  dbInterests.textContent = `Interests: ${learnt} \u00b7 model ${semantics.state}`;
+  renderUpgrades(status.upgrades);
 }
+
+/**
+ * The upgrade shop.
+ *
+ * Rendering is dumb on purpose: affordability and prices come from the
+ * background, which owns the balance, so the popup never guesses and never
+ * shows a button that would fail.
+ */
+function renderUpgrades(upgrades: DatabaseStatusPayload['upgrades']): void {
+  upgradeList.replaceChildren();
+
+  if (upgrades.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = 'no upgrades available';
+    upgradeList.append(empty);
+    return;
+  }
+
+  for (const upgrade of upgrades) {
+    const row = document.createElement('div');
+    row.className = 'upgrade-row';
+
+    const name = document.createElement('div');
+    name.className = 'upgrade-name';
+    name.textContent = `${upgrade.name} ${upgrade.level}/${upgrade.maxLevel}`;
+
+    const description = document.createElement('div');
+    description.className = 'upgrade-description';
+    description.textContent = upgrade.description;
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'upgrade-buy';
+    button.dataset.upgradeId = upgrade.id;
+    const maxed = upgrade.level >= upgrade.maxLevel;
+    button.textContent = maxed ? 'max' : `${upgrade.nextCost} wp`;
+    button.disabled = maxed || !upgrade.affordable;
+
+    row.append(name, description, button);
+    upgradeList.append(row);
+  }
+}
+
+const PURCHASE_FAILURE_TEXT: Record<string, string> = {
+  'unknown-upgrade': 'That upgrade does not exist.',
+  'max-level': 'Already at max level.',
+  'insufficient-points': 'Not enough word points yet.',
+};
+
+upgradeList.addEventListener('click', (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) return;
+  const button = target.closest('button[data-upgrade-id]');
+  if (!(button instanceof HTMLButtonElement) || !button.dataset.upgradeId) return;
+
+  const upgradeId = button.dataset.upgradeId;
+  button.disabled = true;
+
+  void sendRuntimeMessage<UpgradePurchasePayload>({ type: 'xrawl/purchase-upgrade', upgradeId }).then(
+    async (response) => {
+      if (!response?.ok) {
+        showError(`Purchase failed: ${response?.error ?? 'no background worker'}`);
+        return;
+      }
+
+      const result = response.data;
+      if (result.purchased) {
+        showMessage(`Bought ${upgradeId} level ${result.level} for ${result.cost} wp.`);
+      } else {
+        showMessage(PURCHASE_FAILURE_TEXT[result.reason ?? ''] ?? 'Purchase rejected.');
+      }
+
+      await refreshDatabase();
+    },
+  );
+});
 
 function describeBytes(bytes: number): string {
   if (bytes <= 0) return '0 B';

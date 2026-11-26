@@ -6,6 +6,9 @@
  * is trivially reusable and testable on any host.
  */
 import { XRAWL_CONFIG } from '@/shared/constants/config';
+import { normalizeWord } from '@/shared/text';
+
+export { normalizeWord };
 
 export interface WordSegment {
   /** Raw text exactly as it appears in the document. */
@@ -29,8 +32,6 @@ const DEFAULT_OPTIONS: Required<SegmentationOptions> = { minLength: 1, maxSegmen
 
 const FALLBACK_WORD = /[\p{L}\p{N}\p{M}]+(?:['\u2019][\p{L}\p{N}\p{M}]+)*/gu;
 const HAS_WORD_CHARACTER = /[\p{L}\p{N}]/u;
-const EDGE_PUNCTUATION = /^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu;
-const APOSTROPHES = /[\u2018\u2019\u02BC]/g;
 
 interface SegmenterLike {
   segment(input: string): Iterable<{ segment: string; index: number; isWordLike?: boolean }>;
@@ -50,15 +51,6 @@ function getSegmenter(): SegmenterLike | null {
     : null;
 
   return cachedSegmenter;
-}
-
-/** Normalize a raw word into its dictionary key. */
-export function normalizeWord(raw: string): string {
-  return raw
-    .normalize('NFKC')
-    .toLowerCase()
-    .replace(APOSTROPHES, "'")
-    .replace(EDGE_PUNCTUATION, '');
 }
 
 function isWordLike(text: string): boolean {

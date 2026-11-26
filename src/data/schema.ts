@@ -11,6 +11,7 @@
  * `sessions.withEnd(0)` must remain queryable.
  */
 import type { EnvironmentKind } from '@/shared/types/page';
+import type { FeedingSource } from './observation';
 import { stableKey } from '@/shared/id';
 
 export const XRAWL_DB_NAME = 'xrawl';
@@ -22,8 +23,10 @@ export const XRAWL_TABLE_SCHEMAS = {
   environments: 'id, kind, exposureMs, lastExposedAt',
   sessions: 'id, startedAt, lastActiveAt, endedAt',
   upgrades: 'id, purchasedAt, updatedAt',
+  progression: 'id, updatedAt, level',
   personality: 'id, kind, updatedAt, [kind+updatedAt]',
   embeddings: 'id, model, subjectType, subjectId, sourceHash, updatedAt, [model+subjectType+subjectId]',
+  interestProfiles: 'id, category, weight, updatedAt',
 } as const satisfies Record<string, string>;
 
 export const XRAWL_TABLE_NAMES = Object.keys(XRAWL_TABLE_SCHEMAS) as XrawlTableName[];
@@ -122,6 +125,8 @@ export interface FeedingEventRecord {
   contextHash: string;
   /** `WordTarget.fingerprint` of the eaten target. */
   fingerprint: string;
+  /** Who chose the word: the user, or the creature's own foraging. */
+  source: FeedingSource;
   /** Event-local scoring inputs; interpretation belongs to progression, not data. */
   nutrition: number;
   preferenceDelta: number;
@@ -181,6 +186,47 @@ export interface UpgradeRecord {
 }
 
 /* ------------------------------------------------------------------------- */
+/* progression                                                                */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * Running totals for one creature: the two currencies and the history the
+ * reward formula scores against.
+ *
+ * Level is stored for indexing but is always *derived* from `xp` - a row whose
+ * level disagrees with its XP is repaired by the next award. Environment counts
+ * are kept here (rather than counted from the feeding log) so an award is one
+ * read-write of one row, and so the affinity term is reproducible from the row
+ * alone.
+ */
+export interface ProgressionRecord {
+  /** Creature id - progression is per creature, not per player. */
+  id: string;
+  /** Total experience ever earned. */
+  xp: number;
+  /** Derived from `xp`; stored for indexes and cheap reads. */
+  level: number;
+  /** Spendable word points (unspent balance). */
+  wordPoints: number;
+  /** Points earned over all time, spent or not. */
+  lifetimeWordPoints: number;
+  /** Points consumed by upgrades. */
+  spentWordPoints: number;
+  feedings: number;
+  discoveries: number;
+  /** Feedings per environment kind: the raw history, kept for auditing. */
+  environments: Partial<Record<EnvironmentKind, number>>;
+  /**
+   * Normalized environment affinity, always summing to 1 (a 100% pool shared
+   * between every environment kind). Scoring reads this rather than a per-
+   * environment score, so favour shifts between environments instead of
+   * accumulating in several places at once.
+   */
+  affinities: Partial<Record<EnvironmentKind, number>>;
+  updatedAt: number;
+}
+
+/* ------------------------------------------------------------------------- */
 /* personality                                                                */
 /* ------------------------------------------------------------------------- */
 
@@ -223,6 +269,31 @@ export interface EmbeddingRecord {
 }
 
 /* ------------------------------------------------------------------------- */
+/* interest profiles                                                          */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * One learned interest vector.
+ *
+ * `model` and `dimensions` are stored on the row, not assumed: a profile learned
+ * on the lexical fallback must never be compared with a MiniLM vector, so a
+ * model change is a rebuild rather than a silent mix. `weight` is this profile's
+ * share of the attention pool, and all rows sum to 1.
+ */
+export interface InterestProfileRecord {
+  /** Category key, e.g. `technology` or `general`. */
+  id: string;
+  category: string;
+  model: string;
+  dimensions: number;
+  vector: number[];
+  weight: number;
+  observations: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/* ------------------------------------------------------------------------- */
 /* key helpers                                                                */
 /* ------------------------------------------------------------------------- */
 
@@ -241,6 +312,10 @@ export function buildEmbeddingId(
   sourceHash: string,
 ): string {
   return stableKey('embedding', model, dimensions, subjectType, sourceHash);
+}
+
+export function interestProfileId(category: string): string {
+  return category;
 }
 
 export function personalityId(kind: PersonalityKind, key: string): string {

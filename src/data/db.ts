@@ -17,9 +17,11 @@ import {
   XRAWL_DB_NAME,
   type CreatureRecord,
   type EmbeddingRecord,
+  type InterestProfileRecord,
   type EnvironmentRecord,
   type FeedingEventRecord,
   type PersonalityRecord,
+  type ProgressionRecord,
   type SessionRecord,
   type UpgradeRecord,
   type VocabularyRecord,
@@ -50,8 +52,10 @@ export interface XrawlDatabase extends Dexie {
   environments: EntityTable<EnvironmentRecord, 'id'>;
   sessions: EntityTable<SessionRecord, 'id'>;
   upgrades: EntityTable<UpgradeRecord, 'id'>;
+  progression: EntityTable<ProgressionRecord, 'id'>;
   personality: EntityTable<PersonalityRecord, 'id'>;
   embeddings: EntityTable<EmbeddingRecord, 'id'>;
+  interestProfiles: EntityTable<InterestProfileRecord, 'id'>;
   meta: EntityTable<MetaRecord, 'key'>;
 }
 

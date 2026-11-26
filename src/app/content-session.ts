@@ -10,6 +10,7 @@ import { XRAWL_CONFIG } from '@/shared/constants/config';
 import type {
   DownloadResult,
   ExportPayload,
+  PrioritizePayload,
   StatusPayload,
   XrawlResponse,
 } from '@/shared/types/messaging';
@@ -107,6 +108,9 @@ export function startContentSession(): void {
   let pendingSnapshot: WorldSnapshot | null = null;
   let lastPushAt = 0;
 
+  let priorityTimer: number | null = null;
+  let lastPriorityAt = 0;
+
   const pushStatsNow = (snapshot: WorldSnapshot): void => {
     const payload = buildStatus(snapshot, overlay.isVisible);
     try {
@@ -132,6 +136,50 @@ export function startContentSession(): void {
     }, delay);
   };
 
+  /**
+   * Ask the background to rank the words currently on the page.
+   *
+   * Only one request is in flight at a time per throttle window, and the words
+   * are deduplicated: the same word in five paragraphs needs one embedding, and
+   * the response is a plain word-to-priority map the creature applies wholesale.
+   */
+  const schedulePriorities = (): void => {
+    if (priorityTimer !== null) return;
+    const elapsed = platform.scheduler.now() - lastPriorityAt;
+    const delay = Math.max(0, XRAWL_CONFIG.messaging.prioritizeIntervalMs - elapsed);
+    priorityTimer = window.setTimeout(() => {
+      priorityTimer = null;
+      if (!creature.isRunning) return;
+
+      const words: Array<{ word: string; sentence?: string }> = [];
+      const seen = new Set<string>();
+      for (const target of world.getSnapshot().targets) {
+        if (words.length >= XRAWL_CONFIG.messaging.maxPriorityWords) break;
+        const word = target.normalized;
+        if (word.length === 0 || word.length > 64 || seen.has(word)) continue;
+        seen.add(word);
+        words.push({ word, sentence: target.context.sentence });
+      }
+      if (words.length === 0) return;
+
+      lastPriorityAt = platform.scheduler.now();
+      try {
+        void browser.runtime
+          .sendMessage({ type: 'xrawl/prioritize', words })
+          .then((response: unknown) => {
+            const envelope = response as { ok?: boolean; data?: PrioritizePayload } | null;
+            if (!envelope?.ok || !envelope.data) return;
+            const map = new Map<string, number>();
+            for (const entry of envelope.data.priorities) map.set(entry.word, entry.priority);
+            creature.applyPriorities(map);
+          })
+          .catch(() => undefined);
+      } catch {
+        // Background worker unavailable; the creature keeps its rarity fallback.
+      }
+    }, delay);
+  };
+
   world.subscribe((snapshot, reason) => {
     overlay.syncSnapshot(snapshot, reason);
     // Throttled; scroll updates carry refreshed visibility counts.
@@ -140,6 +188,8 @@ export function startContentSession(): void {
     reporter.observe(snapshot);
     // The creature consumes the same snapshot; it never reads the DOM itself.
     creature.syncSnapshot(snapshot);
+    // Learned hunting priorities arrive out of band, from the background.
+    schedulePriorities();
   });
 
   window.addEventListener('pagehide', () => reporter.stop());

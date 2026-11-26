@@ -66,6 +66,14 @@ export const XRAWL_CONFIG = {
     exportTargetLimit: 8_000,
     /** Minimum interval between stats pushes to the background worker. */
     statsPushIntervalMs: 400,
+    /**
+     * Minimum interval between hunting-priority requests. Long on purpose: the
+     * background embeds at most a few dozen new words per batch, and a tab that
+     * scrolls constantly must not turn into a steady inference load.
+     */
+    prioritizeIntervalMs: 3_000,
+    /** Words per priority batch; the rest keep their rarity fallback. */
+    maxPriorityWords: 120,
   },
 
   creature: {

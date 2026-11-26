@@ -46,12 +46,18 @@
       <section class="database">
         <h3>Memory <span id="db-version" class="db-version"></span></h3>
         <div class="db-counts" id="db-counts">not loaded</div>
+        <div class="db-counts" id="db-interests">no interests learned yet</div>
         <div class="db-actions">
           <button id="db-export" type="button">Export world</button>
           <label class="db-import" for="db-import-input">Import world</label>
           <input id="db-import-input" type="file" accept="application/json" hidden />
         </div>
         <div class="db-hint" id="db-hint"></div>
+      </section>
+
+      <section class="upgrades">
+        <h3>Upgrades <span id="wp-balance" class="db-version"></span></h3>
+        <div class="upgrade-list" id="upgrade-list">not loaded</div>
       </section>
 
       <div class="message" id="message" role="status"></div>

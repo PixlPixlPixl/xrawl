@@ -117,8 +117,8 @@ browser globals; only the platform layer does.
 | Creature simulation (implemented) | genetics, attributes, targets, gait | DOM, WXT, IndexedDB |
 | Rendering (implemented) | a pose of plain points, appearance colours | browser storage, progression rules, action decisions |
 | Perception (implemented) | DOM and word geometry | creature behaviour |
-| Progression (future) | feeding events, rarity, upgrades | DOM, rendering |
-| Cognition (future) | context, embeddings, preferences | browser APIs |
+| Progression (implemented) | feeding events, rarity, upgrades | DOM, rendering |
+| Cognition (implemented) | context, embeddings, preferences | browser APIs, DOM |
 | Persistence (implemented) | data models, repositories, migrations | creature rendering, DOM |
 
 ### Current file map
@@ -147,15 +147,27 @@ src/
 │   │   ├── rig.ts                    appearance -> limb chains
 │   │   └── pose.ts                   per-frame geometry (controllers meet)
 │   └── render/svg-renderer.ts        draws a pose; decides nothing
+├── progression/                      scoring: no DOM, no Dexie, no platform
+│   ├── reward.ts                     B + L + F + N + E + P, every part capped
+│   ├── frequency.ts                  local wordfreq table + rarityScore
+│   ├── level.ts                      XP curve, derived level, life stage
+│   ├── affinity.ts                   environment/personality terms, discovery eligibility
+│   ├── semantics.ts                  vector math, interest profiles, attention pool
+│   ├── hunting.ts                    hunting priority + deterministic exploration
+│   ├── upgrades.ts                   catalog + prices (effects live in creature/loadout.ts)
+│   └── data/                         generated frequency table + its attribution
 ├── data/                             persistence: no DOM, no rendering, no UI
 │   ├── schema.ts                     row types + index declarations
 │   ├── migrations.ts                 append-only version history
 │   ├── db.ts                         Dexie instance, version + downgrade guards
 │   ├── repositories/                 one module per table; only code that reads/writes tables
 │   ├── ingest.ts                     observation/feeding write path (clamping, transactions)
+│   ├── progression.ts                feeding award + point-funded purchases (transactional)
 │   ├── export.ts                     whole-database export/import
 │   ├── export-format.ts              export envelope type + guard
 │   ├── observation.ts                payload contracts + hard limits
+│   ├── cognition.ts                  feeding/exposure → profiles → hunting priorities
+│   ├── embeddings.ts                 content-hash vector cache (reuse, never re-infer)
 │   ├── resilience.ts                 persist()/storage-estimate probes
 │   └── service.ts                    background-owned database service (lazy open)
 ├── platform/
@@ -179,12 +191,18 @@ src/
 │   │   ├── classifier.ts             heuristic environment classification
 │   │   └── tracker.ts                page identity + classification cache
 │   └── world-state.ts                target store, visibility, snapshots
+├── semantics/                        the model behind cognition (no DOM, no Dexie)
+│   ├── provider.ts                   EmbeddingProvider port + text/anchors
+│   ├── minilm.ts                     lazy MiniLM pipeline (WASM Q8, WebGPU fp16)
+│   ├── lexical.ts                    deterministic hashed fallback
+│   └── service.ts                    one vector space per session, timeout + fallback
 ├── ui/debug/overlay.ts               canvas outlines, HUD, hover tooltip
 ├── shared/
 │   ├── constants/config.ts           tuning surface
+│   ├── text.ts                       word normalization shared by both sides
 │   ├── id.ts                         stable hashing
 │   └── types/                        geometry, page, word-target, creature, messaging
-└── (planned) progression/, cognition/
+└── public/ort/                      generated ONNX Runtime WASM (gitignored)
 ```
 
 Planned layers are not stubbed out: empty interfaces would be debt. Their
@@ -366,9 +384,10 @@ DevTools to add/remove a paragraph; hover words to inspect targets.
 | popup → content | `xrawl/set-overlay` | toggle outlines (persisted) |
 | popup → content | `xrawl/download-snapshot` | JSON file download initiated in-page |
 | content → background | `xrawl/observe` | browse-time + word deltas for the database |
-| content → background | `xrawl/feed` | one feeding event (append-only) |
+| content → background | `xrawl/feed` | one feeding event (append-only, `source` says who chose it) |
+| content → background | `xrawl/prioritize` | rank visible words against learned interests |
 | content → background | `xrawl/creature-loadout` | resolved genetics + purchase levels |
-| popup → background | `xrawl/db-status` | schema version, word/feeding counts, storage estimate |
+| popup → background | `xrawl/db-status` | schema version, counts, storage, progression, model state |
 | popup → background | `xrawl/db-export` | whole-database JSON envelope |
 | popup → background | `xrawl/db-import` | replace tables from an export envelope |
 
@@ -389,18 +408,20 @@ content script ──xrawl/observe──▶ background ──▶ DatabaseService
                 ──xrawl/feed────▶             (lazy open, single instance)
 ```
 
-### Tables (v1)
+### Tables (v5)
 
 | Table | Key | Purpose |
 | --- | --- | --- |
-| `creatures` | `id` | Core state; `attributes` and `appearance.traits` are open namespaces |
+| `creatures` | `id` | Genetics input + live state; appearance/attributes are derived |
 | `vocabulary` | `word` | Per-word seen/eaten counters and first/last timestamps |
 | `feedingEvents` | `id` | Immutable log; one row per individual eating event |
 | `environments` | `kind:host` | Accumulated exposure, visits, word volume |
 | `sessions` | `id` | Visible browse time, page visits, feedings |
 | `upgrades` | `id` | Purchased upgrades with level and spend |
+| `progression` | `id` | One row per creature: xp, derived level, word points, feeding history, affinity pool |
 | `personality` | `kind:key` | Learned interests/traits as bounded values with confidence |
 | `embeddings` | derived | Vectors keyed by model **and** dimensions |
+| `interestProfiles` | `category` | Learned interest vectors plus their share of the attention pool |
 | `meta` | `key` | Schema bookkeeping, not game data |
 
 Design notes that matter later:
@@ -449,6 +470,235 @@ IndexedDB survives extension updates but not eviction or uninstall:
 
 `browser.storage.local` remains reserved for lightweight settings (the overlay
 toggle); game history belongs in the database.
+
+## Progression
+
+Progression is **fully deterministic**: no model, no randomness, no clock in the
+scoring path. Eating a word produces a reward breakdown, XP and word points
+from the word plus the creature's stored history, so the same save file always
+replays to the same totals. Embeddings and learned preferences come later; this
+layer works without them.
+
+### Two currencies
+
+| Currency | Earned by | Spent on | Stored as |
+| --- | --- | --- | --- |
+| **XP** | every feeding | nothing - it only raises the level | `progression.xp`; level is derived from it |
+| **Word points** | every feeding, a fraction of the same reward | upgrade levels | `progression.wordPoints` |
+
+XP is never spent, so a level is always a *projection* of total XP
+(`progression/level.ts`) and can be recomputed from a save file. Word points
+are an integer wallet; buying an upgrade debits `progression` and writes
+`upgrades` inside one transaction, so points cannot vanish without the upgrade
+being granted. The popup's **Upgrades** panel is the only shop UI.
+
+### The reward formula
+
+```text
+R = B + L + F + N + E + P
+```
+
+| Term | Meaning | Cap |
+| --- | --- | --- |
+| `B` | base reward for any word | 4 |
+| `L` | word-length bonus, 0.75 per character past 2 | 6 |
+| `F` | frequency/rarity bonus, weight 8 x rarity | 8 |
+| `N` | discovery bonus: 12 the first time, then 4/3/2... | 12 |
+| `E` | environment affinity: paid from a shared pool, in proportion to that environment's affinity share | 5 |
+| `P` | personality affinity, weight 4 x learned preference | 4 |
+
+### Environment affinity is dynamic
+
+Every environment draws from **one pool that always totals 100%**. Affinity is a
+normalized distribution, not a set of independent scores:
+
+```text
+feed in "code"   ->  code 20%, every other environment keeps 80% of its share
+                     (the pool is renormalized back to 100%)
+```
+
+The learning rate is 0.2 per feeding, so a new habit takes roughly a dozen
+feedings to dominate and an old one fades instead of being erased. A creature
+that eats 60% of its words on technical sites settles at ~60% technical
+affinity - and a technical feeding pays 60% of what the environment pool makes
+available.
+
+The pool is **10 points**, then **normalized by 0.5**: a 100% favourite pays 5
+points (not 50), a 60% favourite pays 3, a 1-in-10 environment pays 0.5. Large
+enough that a genuinely dominant environment is worth noticing, scaled down so
+it is a moderate increase rather than a runaway multiplier. Affinity is scored
+*before* the feeding that moves it, so a word never pays for its own bonus.
+
+Caps are what keep one gigantic, unusual word from out-earning a page of
+normal ones. `computeReward` (`progression/reward.ts`) returns the full
+breakdown, so a debug panel can always explain a number.
+
+### Rarity without a network call
+
+The table in `progression/data/wordfreq-en.ts` is generated from Robyn Speer's
+**wordfreq** small English wordlist (28,917 words, Zipf >= 3), front-coded and
+stored as a local string; it is decoded lazily into a map on first lookup.
+There is no Python dependency and no network request at runtime, and only
+`scripts/build-word-frequency.mjs` needs the source file to regenerate it.
+
+```ts
+rarityScore(zipf) = clamp((6 - zipf) / (6 - 3), 0, 1)   // 6 common, 3 rare
+```
+
+The data is CC BY-SA 4.0 while the wordfreq code is Apache 2.0; see
+`progression/data/wordfreq-attribution.md` for the notice and what ShareAlike
+means for a redistributed table.
+
+**Unknown words are neutral, not rare.** A word the table has never seen scores
+`0.5` instead of `1.0`. Otherwise random strings, typos, hashes and page IDs
+would be the most profitable food on the page.
+
+### Discoveries count once
+
+The first time a creature eats a word it gets the full discovery bonus; every
+later eating gives a smaller one that decays to a floor of 1. Discovery is
+only awarded when the word is real vocabulary: at least two characters, at
+least one letter, and no whitespace. A single letter (`c` out of `c++`, an
+`s` stripped from a possessive) or a bare number is not a discovery, so
+punctuation fragments cannot be farmed.
+
+Segmentation is Unicode-aware (`Intl.Segmenter`, with a Unicode regex fallback),
+so `state-of-the-art` contributes `state`, `of`, `the`, `art` - never the raw
+compound - and punctuation never becomes a word. The same normalization
+(`shared/text.ts`) runs in the content script and in the background, so both
+sides key the dictionary identically.
+
+### Upgrades
+
+| Upgrade | Effect | Max level | First price |
+| --- | --- | --- | --- |
+| `locomotion.speed` | movement speed | 8 | 40 wp |
+| `digestion.rate` | eating speed | 8 | 35 wp |
+| `metabolism.capacity` | stomach capacity | 8 | 30 wp |
+| `senses.reach` | detection radius | 8 | 45 wp |
+| `senses.vocabulary` | maximum word length | 6 | 55 wp |
+
+Prices compound (`baseCost * growth^(level-1)`). Effects are data in
+`creature/loadout.ts`; the catalog only prices them, and every catalog entry
+must map to a real effect (checked in the tests). A failed purchase is a
+*value* - `insufficient-points`, `max-level`, `unknown-upgrade` - not a throw,
+because the popup has to explain why nothing happened.
+
+Level also drives the creature's life stage (`hatchling` -> `nymph` ->
+`juvenile` -> `adult` -> `elder`); the stage is written to the creature row
+only when a level is gained.
+
+### What is deliberately not here yet
+
+- **No training and no fine-tuning.** The model is fixed; preferences are learned
+  as a profile of its vectors (see [Cognition](#cognition)).
+- Personality rows are written by cognition now, so the `P` term is live, but it
+  still reads scalars rather than the profile vectors themselves.
+- Rewards start at schema v3. Feedings recorded before that are kept in the
+  log but are not paid retroactively.
+
+## Cognition
+
+The creature has a **fixed** semantic model and a **learned** profile. Nothing is
+fine-tuned: MiniLM turns text into a 384-dimension unit vector, and the game is
+arithmetic on top of those vectors. That keeps learning deterministic - the same
+feeding log replays to the same preferences - and keeps the model replaceable.
+
+### The model, loaded lazily
+
+`@huggingface/transformers` runs `Xenova/all-MiniLM-L6-v2` through ONNX Runtime
+Web:
+
+| | |
+| --- | --- |
+| Weights | ~23 MB, Q8 quantized, fetched once from the Hub |
+| Baseline | WASM, single thread (Q8) |
+| Accelerator | WebGPU, when the browser really exposes an adapter (fp16) |
+| Runtime | shipped in the bundle: `src/public/ort`, ~32 MB, generated by `npm run build:ort` |
+| Startup cost | zero - the pipeline is created on the first embedding request |
+
+MV3 needs `'wasm-unsafe-eval'` in the extension CSP, and extension pages may only
+run their own scripts, so ORT's loader cannot come from a CDN: the binaries ship
+with the extension and `env.backends.onnx.wasm.wasmPaths` points at `/ort/`.
+
+**One session, one vector space.** If the model has not loaded within 20 s (slow
+phone, offline), the session commits to the deterministic lexical fallback and
+keeps it. Rows record which model produced them, so a later model change rebuilds
+the profiles instead of comparing two incomparable spaces.
+
+### Profiles: one attention pool
+
+```text
+technology 0.44 · general 0.18 · literature 0.12 · food 0.09 · ...
+```
+
+Profiles are seeded from short anchor phrases, then move with each experience.
+The pool always sums to 1: a new interest takes share *from* the others, exactly
+like environment affinity. Attention shifts; it never accumulates.
+
+| Input | Weight | Why |
+| --- | --- | --- |
+| Manual feeding | 0.5 | the user chose the word on purpose |
+| Environment exposure | 0.15 | a minute somewhere is weaker evidence (one step per 45 s of visible time) |
+| Autonomous feeding | 0.08 | its own foraging must not become self-reinforcing |
+
+The word is embedded **with its sentence**, so `database` in a cooking article and
+`database` in a compiler article pull in different directions. The blend rate slows
+as a profile gathers evidence (`influence / (1 + observations / 6)`), so early
+learning is fast and later learning refines instead of thrashing. Anything closer
+to nothing than to an interest lands on `general` rather than bending its nearest
+neighbour.
+
+### Hunting
+
+`xrawl/prioritize` ships the page's words to the background, which scores them
+against the profiles and returns a word -> priority map. Two stages keep it cheap:
+every word gets a word-level embedding (usually a cache hit), then only the top 24
+are re-embedded with their sentence and re-scored.
+
+```text
+priority = 0.6 * relevance + 0.25 * novelty + 0.15 * rarity + exploration
+```
+
+The creature then chooses by priority *and* proximity (75/25) rather than nearest
+word. Exploration is a **stable hash of the word**, not a random roll: a quarter of
+words carry up to +0.35, scaled by how *unrelated* they are, so the creature
+occasionally eats something it would not normally choose - and the same page
+always produces the same decision.
+
+### Caching
+
+- Vectors are cached by `(model, dimensions, subject type, text hash)`: a
+  sentence is never embedded twice, and a repeated feeding in the same context
+  costs a lookup rather than inference.
+- The browser caches the model weights (Cache API, via transformers.js).
+- `embeddings` is excluded from exports by default because it is rebuildable;
+  `interestProfiles` is not, because it is memory.
+
+### Benchmarking on a phone
+
+`src/semantics/minilm.ts` records each inference batch (texts, milliseconds,
+backend) and exposes it as `modelStats()`; the popup shows the model state. Judge
+the budget there, not on a desktop: the first semantic use also pays the model
+download, and WASM on a midrange phone is roughly an order of magnitude slower
+than a laptop. The batch size (16) and the 24-candidate context limit are the two
+knobs that decide the cost.
+
+### Privacy and cost
+
+The only network traffic is the one-time model download from `huggingface.co`;
+text never leaves the device. The build grows by the ONNX runtime (~34 MB), and
+the model arrives on first semantic use, then from cache.
+
+### What is deliberately not here yet
+
+- No fine-tuning: the model is fixed, preference is a profile.
+- No clustering: categories come from anchors plus `general`; emergent labels
+  would need a second model.
+- No manual feeding UI yet: the 0.5 influence is wired through `source`, but every
+  current feeding is autonomous.
+- Hunting priorities are per word, not per occurrence: two `database` targets
+  share one score even if their sentences differ.
 
 ## Creature
 
@@ -570,15 +820,31 @@ over `xrawl/creature-loadout`.
   the next snapshot; nothing is lost, only delayed.
 - **Import replaces, it does not merge.** Importing a world overwrites the
   tables present in the file. Export first if the current world matters.
-- **Vectors are a cache.** Exports exclude `embeddings` by default; they can be
-  regenerated from source text, and rows record the model and dimensions they
-  were produced with.
+- **Vectors are a cache; profiles are memory.** Exports exclude `embeddings`
+  (regenerable from source text) but include `interestProfiles`, because those
+  vectors are what the creature learned and cannot be recomputed without the
+  feeding log.
+- **One model per session.** A session that falls back to the lexical provider
+  keeps it until restart; profiles are model-scoped so switching never compares
+  two vector spaces.
 - **The creature never opens IndexedDB.** It receives a resolved loadout over
   messaging. Genetics and purchases change on the background's side; the
   content script only derives and draws.
 - **A page's words are finite.** Eaten words are suppressed for a cooldown rather
   than deleted, so a long-lived page eventually runs out of food and the
   creature rests. Reloading or scrolling to new text supplies more.
+- **The frequency table is English-only.** 28,917 words above Zipf 3.0;
+  rarer words, other languages, names, and novel coinages score the neutral
+  rarity instead of a guess, which is the intended anti-farming behaviour.
+- **Progression is per creature, not per player.** One row keyed by creature id,
+  so a lineage would need one row each rather than a shared wallet.
+- **Affinity is recency-weighted, not a lifetime average.** Each feeding moves
+  the distribution by the learning rate, so a creature's favourite environment
+  can change as it browses. Nothing decays over wall-clock time: affinity only
+  moves when something is eaten, and a long absence does not erode it.
+- **Personality affinity is outside the environment pool.** It is signed
+  evidence from learned rows (-1..1), so it can also *reduce* a reward; it has
+  its own cap and does not compete with the environment distribution.
 - **Gait is a tetrapod approximation.** Feet alternate by band parity rather
   than true per-leg phase offsets, and planted feet drag until the step
   threshold. It reads correctly for 6-8 limbs; more exotic gaits would need
@@ -586,19 +852,16 @@ over `xrawl/creature-loadout`.
 
 ## Next steps
 
-1. **Progression** (`progression/`): derive levels, unlock costs, and upgrade
-   availability from `feedingEvents` + `vocabulary` + `upgrades`. Purchases
-   already flow to the creature as attribute multipliers.
-2. **Evolution**: rewrite `genetics` from accumulated evidence. Appearance and
+1. **Evolution**: rewrite `genetics` from accumulated evidence. Appearance and
    attributes are derived, so an evolution needs no migration and cannot
    contradict its own body.
-3. **Cognition**: fill `embeddings` and `personality` using the stored model
-   identifier and dimensionality checks, and let learned preferences bias
-   target choice.
-4. **Cognition**: fill `embeddings` and `personality` using the stored model
-   identifier and dimensionality checks. Personality updates online from
-   accumulated evidence — deterministic and inspectable, not retrained weights.
-5. **Desktop host**: implement `platform/types.ts` ports over Electron/Tauri
+2. **Cognition depth**: manual feeding (the influence is wired but unused),
+   emergent interest categories from clustering the profile vectors, and reward
+   feedback from `P` reading profiles instead of scalar tendencies.
+3. **Reward feedback**: return the reward breakdown to the content script so the
+   debug overlay can show what a feeding was worth, instead of the popup having
+   to be reopened.
+4. **Desktop host**: implement `platform/types.ts` ports over Electron/Tauri
    and feed world perception from a host extraction pipeline; the engine and
    data layers are unchanged.
 
@@ -612,6 +875,7 @@ over `xrawl/creature-loadout`.
 | `npm run compile` | `tsc --noEmit` |
 | `npm test` | unit + integration tests (`vitest`, real IndexedDB via `fake-indexeddb`) |
 | `npm run test:watch` | same, in watch mode |
+| `npm run build:wordfreq` | regenerate the local frequency table from `small_en.msgpack.gz` |
 | `npm run verify` | build + real-browser acceptance suite |
 | `npm run verify:headless` | same, under `xvfb-run` |
 | `npm run zip` | packaged extension zip |

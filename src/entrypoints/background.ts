@@ -21,13 +21,48 @@ import {
   isDatabaseStatusRequest,
   isFeedMessage,
   isObserveMessage,
+  isPrioritizeRequest,
   isStatsPushMessage,
+  isUpgradePurchaseRequest,
 } from '@/shared/types/messaging';
-import type { StatusPayload, XrawlResponse } from '@/shared/types/messaging';
+import type {
+  PrioritizePayload,
+  StatusPayload,
+  UpgradePurchasePayload,
+  XrawlResponse,
+} from '@/shared/types/messaging';
+import type { PurchaseOutcome } from '@/data/progression';
 
 const statsByTab = new Map<number, StatusPayload>();
 
 const ok = <T>(data: T): XrawlResponse<T> => ({ ok: true, data });
+
+/**
+ * Flattens a purchase outcome into the small payload the popup renders.
+ *
+ * The data layer's outcome carries whole rows (upgrade record, definition);
+ * the popup only needs the numbers and the reason nothing happened.
+ */
+function purchasePayload(outcome: PurchaseOutcome): UpgradePurchasePayload {
+  if (outcome.ok) {
+    return {
+      purchased: true,
+      upgradeId: outcome.upgradeId,
+      level: outcome.upgrade.level,
+      cost: outcome.cost,
+      wordPoints: outcome.progression.wordPoints,
+    };
+  }
+
+  return {
+    purchased: false,
+    reason: outcome.reason,
+    upgradeId: outcome.upgradeId,
+    level: outcome.level,
+    cost: outcome.cost,
+    wordPoints: outcome.balance,
+  };
+}
 const fail = (error: unknown): XrawlResponse<never> => ({
   ok: false,
   error: error instanceof Error ? error.message : String(error),
@@ -68,7 +103,23 @@ export default defineBackground(() => {
     if (isObserveMessage(message)) {
       void database
         .ingestObservation(message.payload)
-        .then((result) => sendResponse(ok(result)))
+        .then((result) => {
+          sendResponse(ok(result));
+          // Environment learning is derived from accumulated session time, so it
+          // runs after the write rather than inside it. It may fail quietly:
+          // preferences are not worth losing an observation over.
+          if (result.exposureSteps > 0) {
+            void database
+              .learnFromExposure(
+                message.payload.environment,
+                message.payload.host,
+                result.exposureSteps,
+              )
+              .catch((error: unknown) => {
+                console.warn('[xrawl] exposure learning skipped', String(error));
+              });
+          }
+        })
         .catch((error: unknown) => {
           console.warn('[xrawl] observation write failed', (error as Error)?.stack ?? String(error));
           sendResponse(fail(error));
@@ -80,8 +131,16 @@ export default defineBackground(() => {
       void database
         .ingestFeeding(message.payload)
         .then((written) => {
-          if (!written) sendResponse(fail('invalid feeding payload'));
-          else sendResponse(ok(null));
+          if (!written) {
+            sendResponse(fail('invalid feeding payload'));
+            return;
+          }
+          sendResponse(ok(null));
+          // Cognition runs after the feeding transaction commits: the event is
+          // already durable, and embedding is the slow part on a phone.
+          void database.learnFromFeeding(message.payload).catch((error: unknown) => {
+            console.warn('[xrawl] feeding cognition skipped', String(error));
+          });
         })
         .catch((error: unknown) => {
           console.warn('[xrawl] feeding write failed', (error as Error)?.stack ?? String(error));
@@ -102,6 +161,25 @@ export default defineBackground(() => {
       void database
         .status()
         .then((status) => sendResponse(ok(status)))
+        .catch((error: unknown) => sendResponse(fail(error)));
+      return true;
+    }
+
+    if (isPrioritizeRequest(message)) {
+      void database
+        .prioritize(message.words)
+        .then((result) => {
+          const payload: PrioritizePayload = { model: result.model, priorities: result.priorities };
+          sendResponse(ok(payload));
+        })
+        .catch((error: unknown) => sendResponse(fail(error)));
+      return true;
+    }
+
+    if (isUpgradePurchaseRequest(message)) {
+      void database
+        .purchaseUpgrade(message.upgradeId)
+        .then((outcome) => sendResponse(ok(purchasePayload(outcome))))
         .catch((error: unknown) => sendResponse(fail(error)));
       return true;
     }

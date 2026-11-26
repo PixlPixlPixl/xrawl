@@ -73,6 +73,8 @@ export interface FeedMessage {
     readonly pageTitle: string;
     readonly contextSentence: string;
     readonly fingerprint: string;
+    /** Set only when the user picked the word themselves. */
+    readonly source?: 'manual' | 'autonomous';
     readonly nutrition: number;
     readonly preferenceDelta: number;
   };
@@ -102,6 +104,71 @@ export interface DatabaseStatusPayload {
   readonly vocabularyCount: number;
   readonly feedingCount: number;
   readonly storage: { readonly usage: number; readonly quota: number; readonly persisted: boolean } | null;
+  readonly progression: {
+    readonly level: number;
+    readonly xp: number;
+    readonly xpForNextLevel: number;
+    readonly wordPoints: number;
+    readonly lifetimeWordPoints: number;
+    readonly discoveries: number;
+    readonly feedings: number;
+    /** Environment affinity distribution, summing to 1 (rounded for display). */
+    readonly affinities: Readonly<Partial<Record<string, number>>>;
+  };
+  /** Model state and learned attention shares (empty until something is eaten). */
+  readonly semantics: {
+    readonly state: 'idle' | 'loading' | 'ready' | 'fallback';
+    readonly model: string;
+    readonly profiles: ReadonlyArray<{ readonly category: string; readonly share: number }>;
+    readonly embeddingCount: number;
+  };
+  readonly upgrades: ReadonlyArray<{
+    readonly id: string;
+    readonly name: string;
+    readonly description: string;
+    readonly category: 'locomotion' | 'metabolism' | 'senses';
+    readonly level: number;
+    readonly maxLevel: number;
+    readonly nextCost: number;
+    readonly affordable: boolean;
+  }>;
+}
+
+/** content → background: rank candidate words for hunting. */
+export interface PrioritizeRequest {
+  readonly type: 'xrawl/prioritize';
+  readonly words: ReadonlyArray<{ readonly word: string; readonly sentence?: string }>;
+}
+
+/** background → content: one priority per requested word, in request order. */
+export interface PrioritizePayload {
+  readonly model: string;
+  readonly priorities: ReadonlyArray<{
+    readonly word: string;
+    /** 0..1; higher means the creature would rather eat this word. */
+    readonly priority: number;
+    readonly relevance: number;
+    readonly novelty: number;
+    readonly exploration: number;
+  }>;
+}
+
+/** popup → background: buy the next level of one upgrade with word points. */
+export interface UpgradePurchaseRequest {
+  readonly type: 'xrawl/purchase-upgrade';
+  readonly upgradeId: string;
+}
+
+/** background → popup: the outcome of a purchase attempt. */
+export interface UpgradePurchasePayload {
+  readonly purchased: boolean;
+  readonly reason?: 'unknown-upgrade' | 'max-level' | 'insufficient-points';
+  readonly upgradeId: string;
+  readonly level: number;
+  /** Price that was (or would have been) charged. */
+  readonly cost: number;
+  /** Word point balance after the attempt. */
+  readonly wordPoints: number;
 }
 
 /** popup → background: whole-database JSON. */
@@ -118,10 +185,12 @@ export interface DatabaseImportRequest {
 export type PersistenceRequest =
   | ObserveMessage
   | FeedMessage
+  | PrioritizeRequest
   | DatabaseStatusRequest
   | DatabaseExportRequest
   | DatabaseImportRequest
-  | CreatureLoadoutRequest;
+  | CreatureLoadoutRequest
+  | UpgradePurchaseRequest;
 
 export interface ExportPayload {
   readonly snapshot: WorldSnapshot;
@@ -234,8 +303,25 @@ export function isFeedMessage(message: unknown): message is FeedMessage {
     typeof payload.pageTitle === 'string' &&
     typeof payload.contextSentence === 'string' &&
     typeof payload.fingerprint === 'string' &&
+    (payload.source === undefined ||
+      payload.source === 'manual' ||
+      payload.source === 'autonomous') &&
     typeof payload.nutrition === 'number' &&
     typeof payload.preferenceDelta === 'number'
+  );
+}
+
+export function isPrioritizeRequest(message: unknown): message is PrioritizeRequest {
+  if (!isObject(message) || message.type !== 'xrawl/prioritize') return false;
+  const words = message.words;
+  if (!Array.isArray(words) || words.length === 0) return false;
+  return words.every(
+    (entry) =>
+      isObject(entry) &&
+      typeof entry.word === 'string' &&
+      entry.word.length > 0 &&
+      entry.word.length <= 64 &&
+      (entry.sentence === undefined || typeof entry.sentence === 'string'),
   );
 }
 
@@ -253,4 +339,13 @@ export function isDatabaseExportRequest(message: unknown): message is DatabaseEx
 
 export function isDatabaseImportRequest(message: unknown): message is DatabaseImportRequest {
   return isObject(message) && message.type === 'xrawl/db-import' && 'envelope' in message;
+}
+
+export function isUpgradePurchaseRequest(message: unknown): message is UpgradePurchaseRequest {
+  return (
+    isObject(message) &&
+    message.type === 'xrawl/purchase-upgrade' &&
+    typeof message.upgradeId === 'string' &&
+    message.upgradeId.length > 0
+  );
 }

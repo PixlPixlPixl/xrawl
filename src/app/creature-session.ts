@@ -57,6 +57,8 @@ export class CreatureSession {
 
   private currentCreatureId: string;
   private targetCache: { revision: number; targets: ForageTarget[] } | null = null;
+  /** Learned hunting priorities keyed by normalized word, from the background. */
+  private priorities: ReadonlyMap<string, number> = new Map();
 
   constructor(options: CreatureSessionOptions) {
     this.options = options;
@@ -178,6 +180,7 @@ export class CreatureSession {
 
     const targets = buildForageTargets(snapshot.targets, {
       maximumWordLength: this.forageFilters.maximumWordLength,
+      priorities: this.priorities,
     });
     this.targetCache = { revision: snapshot.revision, targets };
     return targets;
@@ -236,6 +239,18 @@ export class CreatureSession {
       this.renderer.applyAppearance(resolved.appearance);
       this.targetCache = null;
     }
+  }
+
+  /**
+   * Replace the learned priorities for the words on this page.
+   *
+   * The candidate list is rebuilt (not patched) because selection reads
+   * `priority` from every target: patching a subset would leave the rest on
+   * their rarity fallback and quietly bias the comparison.
+   */
+  applyPriorities(priorities: ReadonlyMap<string, number>): void {
+    this.priorities = priorities;
+    this.targetCache = null;
   }
 
   /** Exposed for tests and for the popup to show a live stat. */

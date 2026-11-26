@@ -30,6 +30,9 @@ export interface ObservationPayload {
   readonly uniqueWordCount: number;
 }
 
+/** \`manual\` when the user chose the word; the creature's own foraging is autonomous. */
+export type FeedingSource = 'manual' | 'autonomous';
+
 export interface FeedingPayload {
   readonly sessionId: string;
   readonly creatureId: string;
@@ -40,6 +43,8 @@ export interface FeedingPayload {
   readonly pageTitle: string;
   readonly contextSentence: string;
   readonly fingerprint: string;
+  /** Defaults to autonomous: only an explicit user action is manual. */
+  readonly source?: FeedingSource;
   readonly nutrition: number;
   readonly preferenceDelta: number;
 }
@@ -50,6 +55,12 @@ export const OBSERVATION_LIMITS = {
   maxWordLength: 64,
   maxActiveMsPerFlush: 60 * 60 * 1_000,
   maxSentenceLength: 240,
+  /**
+   * Active time in one environment needed for one exposure-learning step.
+   * Coarse on purpose: a minute of browsing is moderate evidence, and per-flush
+   * learning would turn idling into training.
+   */
+  exposureStepMs: 45_000,
 } as const;
 
 export function isValidWord(word: string): boolean {
