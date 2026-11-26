@@ -42,7 +42,6 @@ export default tseslint.config(
       '.wxt/**',
       '.output/**',
       'src/public/**',
-      'graphify-out/**',
       'test/fixtures/**',
     ],
   },
