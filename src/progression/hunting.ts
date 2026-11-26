@@ -55,11 +55,6 @@ export interface HuntPlan {
   readonly priority: number;
 }
 
-/** Deterministic exploration: the word itself decides, never a clock. */
-export function explorationUnits(word: string): number {
-  return stableUnit(word);
-}
-
 /**
  * Whether this word is an exploration pick, at a given curiosity rate.
  *
@@ -107,14 +102,4 @@ export function planHunt(input: HuntInput): HuntPlan {
     exploration,
     priority: clamp01(base + exploration),
   };
-}
-
-/** Priority for a word whose vector is unavailable (still novel/rare aware). */
-export function planHuntWithoutEmbedding(input: {
-  word: string;
-  timesEaten: number;
-  rarity: number;
-  interest: number;
-}): HuntPlan {
-  return planHunt({ ...input, embedding: [], profiles: [] });
 }

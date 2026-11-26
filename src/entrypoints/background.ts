@@ -12,7 +12,7 @@
  */
 import { browser, defineBackground } from '#imports';
 import { createDatabaseService, type DatabaseService } from '@/data/service';
-import { markDatabaseCreated } from '@/platform/browser/resilience';
+import { markDatabaseCreated, readDatabaseCreatedAt } from '@/platform/browser/resilience';
 import {
   isCachedStatsRequest,
   isCreatureLoadoutRequest,
@@ -30,6 +30,7 @@ import {
   isUpgradePurchaseRequest,
 } from '@/shared/types/messaging';
 import type {
+  DatabaseStatusPayload,
   PrioritizePayload,
   SetContextStoragePayload,
   SetSiteInterestPayload,
@@ -189,9 +190,15 @@ export default defineBackground(() => {
     }
 
     if (isDatabaseStatusRequest(message)) {
-      void database
-        .status()
-        .then((status) => sendResponse(ok(status)))
+      void (async () => {
+        // Read the resilience marker *before* opening: the open itself writes
+        // it, which would make a fresh install look like it already existed.
+        const databaseCreatedAt = await readDatabaseCreatedAt();
+        const status = await database.status();
+        const payload: DatabaseStatusPayload = { ...status, databaseCreatedAt };
+        return payload;
+      })()
+        .then((payload) => sendResponse(ok(payload)))
         .catch((error: unknown) => sendResponse(fail(error)));
       return true;
     }

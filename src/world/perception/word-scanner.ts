@@ -96,6 +96,11 @@ export class WordScanner {
   private scrollFramePending = false;
   private observer: MutationObserver | null = null;
   private readonly observedShadowRoots = new WeakSet<ShadowRoot>();
+  /** Subtrees added since the last pass, scanned for new shadow roots. */
+  private readonly shadowScanQueue: Element[] = [];
+  private readonly shadowScanQueued = new Set<Element>();
+  /** Opacity hit tests spent in the current pass (see `maxOcclusionChecks`). */
+  private occlusionChecks = 0;
   private cleanups: Array<() => void> = [];
 
   private passCount = 0;
@@ -305,6 +310,15 @@ export class WordScanner {
 
     this.mutationBatches += 1;
 
+    // Shadow roots are invisible to the document observer, so a subtree that
+    // just appeared may contain hosts worth observing. Queueing the added
+    // nodes avoids re-querying the whole document on every pass.
+    for (const record of records) {
+      for (const added of record.addedNodes) {
+        if (added.nodeType === Node.ELEMENT_NODE) this.queueShadowScan(added as Element);
+      }
+    }
+
     if (this.doc.visibilityState === 'hidden') {
       this.deferredForHiddenDoc = true;
       this.deferredPasses += 1;
@@ -472,6 +486,7 @@ export class WordScanner {
     this.visibility.invalidate();
     this.clips.reset();
     this.contextResolver.reset();
+    this.occlusionChecks = 0;
 
     const refresh = this.tracker.refresh(this.doc);
     this.world.setPage(refresh.page);
@@ -554,7 +569,7 @@ export class WordScanner {
 
       if (!scoped) {
         this.pruneUnseenNodes(seen);
-        this.discoverShadowRoots();
+        this.flushShadowScan();
       }
 
       // Reconcile viewport geometry with the scroll position after the pass.
@@ -674,8 +689,14 @@ export class WordScanner {
       if (rects.length === 0) continue;
 
       const baseVisibility = computeVisibility(rects, viewport);
+      // Occlusion is the most expensive per-word check in the pass, so it is
+      // budgeted: past the limit, words are reported as unoccluded until the
+      // next pass rather than paying a hit test for every word on the page.
+      const canCheckOcclusion =
+        baseVisibility.inViewport && this.occlusionChecks < XRAWL_CONFIG.scan.maxOcclusionChecks;
+      if (canCheckOcclusion) this.occlusionChecks += 1;
       const visibility =
-        baseVisibility.inViewport && this.isOccluded(node, rects, viewport)
+        canCheckOcclusion && this.isOccluded(node, rects, viewport)
           ? { ...baseVisibility, occluded: true }
           : baseVisibility;
 
@@ -720,37 +741,66 @@ export class WordScanner {
   }
 
   /**
-   * A word whose center point is not covered by its own subtree is hidden
-   * behind a later-painted element (dialog, overlay panel, stacked card), so
-   * outlining it would draw a box over unrelated content.
-   */
-  /**
-   * Shadow roots are invisible to the document-level MutationObserver, so
-   * observe every open root and recurse into nested hosts.
+   * Shadow roots are invisible to the document-level MutationObserver, so every
+   * open root is observed too, and nested hosts are followed.
+   *
+   * The full document is scanned once at start; after that, only the subtrees
+   * reported by mutations are searched, which keeps shadow support from costing
+   * a `querySelectorAll('*')` on every pass.
    */
   private discoverShadowRoots(): void {
+    this.observeShadowSubtrees([this.doc]);
+  }
+
+  /** Queue a subtree for shadow-root discovery on the next full pass. */
+  private queueShadowScan(root: Element): void {
+    if (this.shadowScanQueued.has(root)) return;
+    // Bounded: a page that rewrites its DOM thousands of times with no pass in
+    // between must not grow this without limit.
+    if (this.shadowScanQueue.length >= 500) return;
+    this.shadowScanQueued.add(root);
+    this.shadowScanQueue.push(root);
+  }
+
+  private flushShadowScan(): void {
+    if (this.shadowScanQueue.length === 0) return;
+    const roots = this.shadowScanQueue.splice(0);
+    this.shadowScanQueued.clear();
+    this.observeShadowSubtrees(roots);
+  }
+
+  private observeShadowSubtrees(roots: readonly (Document | ShadowRoot | Element)[]): void {
     const observer = this.observer;
     if (observer === null) return;
 
-    const observeTree = (root: Document | ShadowRoot): void => {
+    const stack: Array<Document | ShadowRoot | Element> = [...roots];
+    while (stack.length > 0) {
+      const root = stack.pop()!;
+      // The root itself may be a host that was just added.
+      const ownRoot = 'shadowRoot' in root ? root.shadowRoot : null;
+      if (ownRoot !== null) {
+        this.observeShadowRoot(ownRoot, observer);
+        stack.push(ownRoot);
+      }
       for (const element of root.querySelectorAll('*')) {
         const shadow = element.shadowRoot;
         if (shadow === null) continue;
-        if (!this.observedShadowRoots.has(shadow)) {
-          this.observedShadowRoots.add(shadow);
-          observer.observe(shadow, {
-            childList: true,
-            subtree: true,
-            characterData: true,
-            attributes: true,
-            attributeFilter: [...XRAWL_CONFIG.scan.mutationAttributeFilter],
-          });
-        }
-        observeTree(shadow);
+        this.observeShadowRoot(shadow, observer);
+        stack.push(shadow);
       }
-    };
+    }
+  }
 
-    observeTree(this.doc);
+  private observeShadowRoot(shadow: ShadowRoot, observer: MutationObserver): void {
+    if (this.observedShadowRoots.has(shadow)) return;
+    this.observedShadowRoots.add(shadow);
+    observer.observe(shadow, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: [...XRAWL_CONFIG.scan.mutationAttributeFilter],
+    });
   }
 
   private composedParent(element: Element): Element | null {
@@ -774,6 +824,11 @@ export class WordScanner {
     return false;
   }
 
+  /**
+   * A word whose centre point is not covered by its own subtree is hidden behind
+   * a later-painted element (dialog, overlay panel, stacked card), so outlining
+   * it would draw a box over unrelated content.
+   */
   private isOccluded(node: Text, rects: readonly Rect[], viewport: Viewport): boolean {
     const parent = node.parentElement;
     if (!parent) return false;

@@ -14,6 +14,7 @@ function input(overrides: Partial<BrainInput> = {}): BrainInput {
     capacity: 4,
     satiety: 0,
     digesting: false,
+    manual: false,
     ...overrides,
   };
 }
@@ -62,6 +63,42 @@ describe('action transitions', () => {
     expect(
       decideAction(input({ action: 'following', hasTarget: false, actionElapsed: 5 })).action,
     ).toBe('foraging');
+  });
+
+  it('wakes from rest for a word the user picked', () => {
+    // Full creature, word across the page: the machine rests, but a deliberate
+    // pick must still be walked to or the click looks broken.
+    const resting = decideAction(
+      input({
+        action: 'resting',
+        hasTarget: true,
+        distance: 900,
+        stomach: 4,
+        capacity: 4,
+        satiety: 1,
+      }),
+    );
+    expect(resting.action).toBe('resting');
+
+    const picked = decideAction(
+      input({
+        action: 'resting',
+        hasTarget: true,
+        distance: 900,
+        stomach: 4,
+        capacity: 4,
+        satiety: 1,
+        manual: true,
+      }),
+    );
+    expect(picked.action).toBe('approaching');
+  });
+
+  it('approaches a manual pick from idle even outside detection range', () => {
+    const decision = decideAction(
+      input({ action: 'idle', hasTarget: true, distance: 900, manual: true }),
+    );
+    expect(decision.action).toBe('approaching');
   });
 
   it('gives up foraging and idles', () => {

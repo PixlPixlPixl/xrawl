@@ -24,7 +24,12 @@ export interface FeedingModeOptions {
   readonly window: Window;
   /** Which word is under a document-space point, if any. */
   readonly resolve: (point: { x: number; y: number }) => FeedingCandidate | null;
-  readonly onFeed: (candidate: FeedingCandidate) => void;
+  /**
+   * Hand the word to the creature. Return `false` when it cannot be taken
+   * (the word left the page), so the user is told instead of the click
+   * disappearing into nothing.
+   */
+  readonly onFeed: (candidate: FeedingCandidate) => boolean;
   readonly onChange?: (active: boolean) => void;
 }
 
@@ -39,6 +44,7 @@ export class FeedingMode {
   private readonly highlight: HTMLElement;
   private isActive = false;
   private previousCursor = '';
+  private rejectTimer: number | null = null;
 
   constructor(options: FeedingModeOptions) {
     this.options = options;
@@ -64,6 +70,7 @@ export class FeedingMode {
     if (this.isActive === active) return;
     this.isActive = active;
     if (!active) {
+      this.clearRejection();
       this.hideHighlight();
       this.options.document.documentElement.style.cursor = this.previousCursor;
     } else {
@@ -75,6 +82,7 @@ export class FeedingMode {
 
   destroy(): void {
     this.setActive(false);
+    this.clearRejection();
     this.highlight.remove();
     const window = this.options.window;
     window.removeEventListener('pointermove', this.onPointerMove, { capture: true } as EventListenerOptions);
@@ -96,7 +104,40 @@ export class FeedingMode {
       this.hideHighlight();
       return;
     }
-    const rects = candidate.rects;
+    this.positionHighlight(candidate.rects);
+  };
+
+  private readonly onPointerDown = (event: PointerEvent): void => {
+    if (!this.isActive) return;
+    // Swallow the press so a link never sees a mousedown it did not earn.
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
+  private readonly onClick = (event: MouseEvent): void => {
+    if (!this.isActive) return;
+    event.preventDefault();
+    event.stopPropagation();
+
+    const candidate = this.options.resolve(this.pointOf(event));
+    if (candidate === null) return;
+
+    // The word was measured a moment ago; if the creature refused it, say so
+    // instead of letting the click look like a no-op.
+    if (!this.options.onFeed(candidate)) {
+      this.positionHighlight(candidate.rects);
+      this.flashUnavailable();
+    }
+  };
+
+  private readonly onKeyDown = (event: KeyboardEvent): void => {
+    if (!this.isActive || event.key !== 'Escape') return;
+    event.preventDefault();
+    event.stopPropagation();
+    this.setActive(false);
+  };
+
+  private positionHighlight(rects: FeedingCandidate['rects']): void {
     if (rects.length === 0) {
       this.hideHighlight();
       return;
@@ -118,30 +159,27 @@ export class FeedingMode {
     this.highlight.style.width = `${right - left}px`;
     this.highlight.style.height = `${bottom - top}px`;
     this.highlight.style.display = 'block';
-  };
+  }
 
-  private readonly onPointerDown = (event: PointerEvent): void => {
-    if (!this.isActive) return;
-    // Swallow the press so a link never sees a mousedown it did not earn.
-    event.preventDefault();
-    event.stopPropagation();
-  };
+  /** Red flash: the word under the pointer could not be fed. */
+  private flashUnavailable(): void {
+    this.highlight.style.borderColor = 'rgba(255,110,110,0.95)';
+    this.highlight.style.background = 'rgba(255,110,110,0.14)';
+    if (this.rejectTimer !== null) this.options.window.clearTimeout(this.rejectTimer);
+    this.rejectTimer = this.options.window.setTimeout(() => {
+      this.rejectTimer = null;
+      this.clearRejection();
+    }, 320);
+  }
 
-  private readonly onClick = (event: MouseEvent): void => {
-    if (!this.isActive) return;
-    event.preventDefault();
-    event.stopPropagation();
-
-    const candidate = this.options.resolve(this.pointOf(event));
-    if (candidate !== null) this.options.onFeed(candidate);
-  };
-
-  private readonly onKeyDown = (event: KeyboardEvent): void => {
-    if (!this.isActive || event.key !== 'Escape') return;
-    event.preventDefault();
-    event.stopPropagation();
-    this.setActive(false);
-  };
+  private clearRejection(): void {
+    if (this.rejectTimer !== null) {
+      this.options.window.clearTimeout(this.rejectTimer);
+      this.rejectTimer = null;
+    }
+    this.highlight.style.borderColor = '';
+    this.highlight.style.background = '';
+  }
 
   private hideHighlight(): void {
     this.highlight.style.display = 'none';

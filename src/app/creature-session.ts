@@ -243,7 +243,6 @@ export class CreatureSession {
       dtSeconds: dt,
       targets,
       now: Date.now(),
-      satiety: this.satietyFromSnapshot(),
       mode: this.mode,
       follow,
       trailingDistance: this.trailingDistance,
@@ -274,8 +273,9 @@ export class CreatureSession {
   private currentTargets(): ForageTarget[] {
     const snapshot = this.snapshot;
     if (!snapshot) return [];
-    // Rebuild only when the detection radius changes; the target list itself is
-    // a cheap filter over the snapshot and must not allocate per frame.
+    // Rebuild once per snapshot revision (and whenever the loadout or the
+    // learned plans change); the target list is a filter over the snapshot and
+    // must not be allocated per frame.
     const cache = this.targetCache;
     if (cache && cache.revision === snapshot.revision) return cache.targets;
 
@@ -285,10 +285,6 @@ export class CreatureSession {
     });
     this.targetCache = { revision: snapshot.revision, targets };
     return targets;
-  }
-
-  private satietyFromSnapshot(): number {
-    return this.engine.stomachFill / Math.max(1, this.engine.attributes.stomachCapacity);
   }
 
   private reportFeeding(

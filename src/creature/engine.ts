@@ -23,8 +23,6 @@ import type {
   CreatureGenetics,
   CreatureMode,
 } from '@/shared/types/creature';
-import { resolveGenetics } from './species';
-import { resolveLoadout } from './loadout';
 import { ACTION_SPEED_SCALE, decideAction, isStationaryAction } from './brain';
 import { MovementController } from './movement/movement-controller';
 import { GaitController, type BodyTransform } from './movement/gait-controller';
@@ -62,8 +60,6 @@ export interface StepInput {
   readonly targets: readonly ForageTarget[];
   /** Milliseconds, injected so the engine is deterministic under test. */
   readonly now: number;
-  /** 0..1 stomach fullness projection, from the persisted creature state. */
-  readonly satiety?: number;
   /** Which gameplay mode drives target selection this tick. */
   readonly mode?: CreatureMode;
   /** Pointer position in document space; companion mode follows it. */
@@ -97,7 +93,6 @@ export class CreatureEngine {
   actionElapsed = 0;
   private eatProgress = 0;
   private stomach = 0;
-  private satiety = 0;
   private time = 0;
   private currentTarget: ForageTarget | null = null;
   private digestingFor = 0;
@@ -167,7 +162,6 @@ export class CreatureEngine {
     const dt = Math.min(MAX_DT, Math.max(0, input.dtSeconds));
     this.time += dt;
     this.actionElapsed += dt;
-    this.satiety = input.satiety ?? this.satiety;
 
     // Retire a target that vanished from the page (navigated, removed, hidden).
     if (this.currentTarget && !input.targets.some((target) => target.id === this.currentTarget!.id)) {
@@ -247,6 +241,7 @@ export class CreatureEngine {
       capacity: this.attributes.stomachCapacity,
       satiety: this.stomach / Math.max(1, this.attributes.stomachCapacity),
       digesting: this.digestingFor > 0,
+      manual: this.manualFingerprint !== null,
     });
 
     if (decision.action !== this.action) {
@@ -414,20 +409,4 @@ function lead(destination: Point, origin: Point, bodyWidth: number): Point {
     x: destination.x + (dx / distance) * offset,
     y: destination.y + (dy / distance) * offset,
   };
-}
-
-/** Convenience for hosts that only hold genetics. */
-export function createEngineFromGenetics(
-  genetics: CreatureGenetics,
-  gait: CreatureEngineConfig['gait'],
-  upgradeLevels: Readonly<Record<string, number>> = {},
-): CreatureEngine {
-  const resolved = resolveGenetics(genetics);
-  const loadout = resolveLoadout(resolved, upgradeLevels);
-  return new CreatureEngine({
-    appearance: loadout.appearance,
-    attributes: loadout.attributes,
-    gait,
-    genetics: resolved,
-  });
 }

@@ -48,20 +48,6 @@ export async function putEmbedding(
   });
 }
 
-export async function getEmbedding(
-  db: XrawlDatabase,
-  model: string,
-  subjectType: EmbeddingSubjectType,
-  sourceHash: string,
-): Promise<EmbeddingRecord | undefined> {
-  const existing = await db.embeddings
-    .where('[model+subjectType+subjectId]')
-    .between([model, subjectType, ''], [model, subjectType, '\uffff'])
-    .filter((row) => row.sourceHash === sourceHash)
-    .first();
-  return existing;
-}
-
 /** Exact cache lookup — the common path, since the id is derivable up front. */
 export async function findEmbedding(
   db: XrawlDatabase,

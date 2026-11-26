@@ -119,6 +119,16 @@ export type CreatureLoadoutPayload = import('@/shared/types/creature').CreatureL
 export interface DatabaseStatusPayload {
   readonly schemaVersion: number;
   readonly creatureId: string;
+  /** First open of this store, from its own `meta` table (0 when unknown). */
+  readonly createdAt: number;
+  /**
+   * The `storage.local` creation marker, read *before* the store is opened.
+   *
+   * Null on a genuinely new install. When it predates `createdAt`, the database
+   * was evicted and recreated, so the UI can say the history is gone instead of
+   * presenting an empty journal as normal.
+   */
+  readonly databaseCreatedAt: number | null;
   readonly vocabularyCount: number;
   readonly feedingCount: number;
   readonly storage: { readonly usage: number; readonly quota: number; readonly persisted: boolean } | null;
@@ -141,6 +151,8 @@ export interface DatabaseStatusPayload {
     readonly model: string;
     readonly profiles: ReadonlyArray<{ readonly category: string; readonly share: number }>;
     readonly embeddingCount: number;
+    /** Last inference batch, or null before the model has actually run. */
+    readonly lastBatch: { readonly count: number; readonly ms: number; readonly device: 'wasm' | 'webgpu' } | null;
   };
   readonly upgrades: ReadonlyArray<{
     readonly id: string;

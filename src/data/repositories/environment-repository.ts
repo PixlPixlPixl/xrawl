@@ -53,10 +53,6 @@ export async function recordEnvironmentExposure(
   });
 }
 
-export async function getEnvironment(db: XrawlDatabase, id: string): Promise<EnvironmentRecord | undefined> {
-  return db.environments.get(id);
-}
-
 /** Heaviest exposure first — "what has the creature actually lived in?". */
 export async function listEnvironmentsByExposure(
   db: XrawlDatabase,

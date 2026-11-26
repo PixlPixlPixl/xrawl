@@ -7,6 +7,13 @@
  * the tests free of ONNX, and makes a desktop host able to inject its own.
  */
 
+/** Timing and backend of the last inference batch, for on-device budgets. */
+export interface EmbeddingBatchStats {
+  readonly count: number;
+  readonly ms: number;
+  readonly device: 'wasm' | 'webgpu';
+}
+
 export interface EmbeddingProvider {
   /** Model identity, stored on every cache row. */
   readonly model: string;
@@ -19,6 +26,13 @@ export interface EmbeddingProvider {
    * compares cosines), one vector per input, in input order.
    */
   embed(texts: readonly string[]): Promise<number[][]>;
+  /**
+   * Last batch the provider actually ran, or null before the first one.
+   *
+   * Optional because a deterministic test provider has no cost worth reporting;
+   * the real one uses it to answer "is this affordable on a midrange phone?".
+   */
+  stats?(): EmbeddingBatchStats | null;
 }
 
 /**
@@ -38,27 +52,3 @@ export function feedingText(word: string, contextSentence: string): string {
     : `${word}: ${sentence}`;
 }
 
-/**
- * Synthetic context for an environment, used by exposure learning.
- *
- * There is no page text at the point where "you spent a minute in docs" is
- * known, so each environment kind gets a fixed description. It is deliberately
- * short: an anchor, not a summary.
- */
-export const ENVIRONMENT_ANCHORS: Readonly<Record<string, string>> = {
-  code: 'source code, repository, compiler, algorithm, function, database, api, syntax',
-  docs: 'documentation, reference, manual, guide, api, tutorial, installation',
-  article: 'article, blog post, news, story, opinion, explanation, reading',
-  social: 'social feed, post, comment, conversation, community, discussion',
-  media: 'video, music, image, stream, episode, gallery',
-  shop: 'product, price, cart, review, shopping, order, delivery',
-  reference: 'wiki, encyclopedia, reference, definition, overview',
-  unknown: 'page, website, text, words, browsing',
-};
-
-/** Fallback text for a kind that has no anchor of its own. */
-export function environmentAnchorText(environment: string, host: string): string {
-  const anchor = ENVIRONMENT_ANCHORS[environment] ?? ENVIRONMENT_ANCHORS.unknown!;
-  const site = host.trim();
-  return site.length > 0 ? `${anchor} on ${site}` : anchor;
-}

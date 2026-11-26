@@ -111,15 +111,6 @@ export async function readInterests(
 /* per-site overrides                                                         */
 /* ------------------------------------------------------------------------- */
 
-export async function getSiteOverride(
-  db: XrawlDatabase,
-  host: string,
-): Promise<InterestOverrideRecord | undefined> {
-  const normalized = interestOverrideId(host);
-  if (normalized.length === 0) return undefined;
-  return db.interestOverrides.get(normalized);
-}
-
 /**
  * Set or clear one host's interest.
  *
@@ -143,13 +134,6 @@ export async function setSiteOverride(
   const record: InterestOverrideRecord = { host: normalized, interest, updatedAt: now };
   await db.interestOverrides.put(record);
   return record;
-}
-
-export async function listSiteOverrides(
-  db: XrawlDatabase,
-  limit = 100,
-): Promise<InterestOverrideRecord[]> {
-  return db.interestOverrides.orderBy('updatedAt').reverse().limit(limit).toArray();
 }
 
 /** What a page would teach right now, including whether it is overridden. */

@@ -8,9 +8,11 @@
     "dev": "node scripts/copy-ort-wasm.mjs && wxt",
     "dev:firefox": "node scripts/copy-ort-wasm.mjs && wxt -b firefox",
     "build": "node scripts/copy-ort-wasm.mjs && wxt build",
-    "build:firefox": "wxt build -b firefox",
+    "build:firefox": "node scripts/copy-ort-wasm.mjs && wxt build -b firefox",
     "zip": "wxt zip",
     "compile": "tsc --noEmit",
+    "lint": "eslint .",
+    "check": "npm run compile && npm run lint && npm test",
     "verify": "npm run build && node test/verify.mjs",
     "verify:headless": "npm run build && xvfb-run -a node test/verify.mjs",
     "postinstall": "wxt prepare",
@@ -20,9 +22,13 @@
     "build:ort": "node scripts/copy-ort-wasm.mjs"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "eslint": "^9.39.5",
     "fake-indexeddb": "^6.2.8",
+    "globals": "^15.15.0",
     "playwright-core": "^1.65.1",
     "typescript": "^5.7.3",
+    "typescript-eslint": "^8.74.0",
     "vitest": "^5.1.1",
     "wxt": "^0.20.6"
   },

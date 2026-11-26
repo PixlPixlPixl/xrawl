@@ -5,10 +5,12 @@ but the game engine, world model, and persistence contracts are deliberately
 kept independent of browser APIs so the same simulation can later run inside a
 desktop host.
 
-This repository implements **milestone 1: the word-discovery debugger**, plus
-**the persistence foundation** the game will build on. There is intentionally no
-creature movement or progression logic yet — the schema, migrations, and
-repositories exist so those layers have somewhere durable to land.
+This repository implements **all seven initial-release milestones**: the
+perception engine and its debug harness, the persistence foundation and journal,
+the parameterised creature with its movement/gait/FABRIK stack, eating and
+progression, the companion and foraging modes, environment/personality
+learning, and the semantic layer that turns feedings into an evolving interest
+profile.
 
 ## Quick start
 
@@ -37,8 +39,12 @@ debug outline.
 - **HUD** (top right) — total targets, targets in view, unique words, last pass
   duration/kind, environment, and a capped-scan warning.
 - **`Alt+Shift+X`** — toggle outlines. The setting is persisted.
-- **Toolbar popup** — live stats, top words, environment classification,
-  scan metadata, rescan, copy full snapshot JSON, download snapshot JSON.
+- **`Alt+Shift+M`** — switch between companion and foraging.
+- **`Alt+Shift+F`** — manual feeding mode: click a word to feed it, `Esc`
+  leaves. Off by default, so the creature never hijacks links or selection.
+- **Toolbar popup** — live stats, top words, environment classification, scan
+  metadata, rescan, snapshot export, creature controls, the upgrade shop, the
+  site-interest override, and the world-memory panel (export/import, journal).
 
 The snapshot JSON is exactly what later layers consume:
 
@@ -132,6 +138,8 @@ src/
 ├── app/
 │   ├── content-session.ts            composition root (platform + world + ui)
 │   ├── observation-reporter.ts       browse-time / word deltas sent to the background
+│   ├── feeding-outbox.ts             retry queue: an unacknowledged bite is re-sent
+│   ├── feeding-mode.ts               click-a-word selection mode + highlight
 │   └── creature-session.ts           frame loop: snapshot -> engine -> SVG + feed
 ├── creature/                         simulation: no DOM, no Dexie, no platform
 │   ├── species.ts                    gene sets -> appearance + attributes
@@ -176,7 +184,6 @@ src/
 │       ├── browser-adapter.ts        the only browser API implementation of ports
 │       ├── messaging.ts              typed runtime/tab message helpers
 │       ├── navigation.ts             SPA URL change detection
-│       ├── permissions.ts            lazy permission helpers (not wired yet)
 │       └── resilience.ts             eviction-aid marker in extension storage
 ├── world/
 │   ├── perception/
@@ -307,6 +314,9 @@ npm run verify          # desktop (needs a display)
 npm run verify:headless # Linux CI via xvfb-run
 ```
 
+`.github/workflows/ci.yml` runs two jobs: `npm run compile && npm run lint &&
+npm test` on every push and pull request, and the browser suite under xvfb.
+
 It drives the persistence channel through the popup (the only context whose
 `runtime.sendMessage` reaches the background listener): it waits for observation
 flushes to reach the database, asserts a known fixture word persisted, exports
@@ -325,7 +335,7 @@ content, inline-split spans, an animation-revealed paragraph, a lazy
 `content-visibility` section below the fold, a paragraph covered by an opaque
 panel, an `display:contents` wrapper, screen-reader-only/legacy-clip/clip-path
 text, an open shadow root with static and post-load text, and below-the-fold
-words. The 34 checks cover:
+words. The 45 checks cover:
 
 - word discovery, original vs normalized text, reading order;
 - multi-rect wrapping and positive finite geometry;
@@ -415,6 +425,12 @@ content script ──xrawl/observe──▶ background ──▶ DatabaseService
                 ──xrawl/feed────▶             (lazy open, single instance)
 ```
 
+Observations are periodic, so a dropped flush only delays what the next one
+carries. A feeding is not: losing it loses the word and its reward for good, so
+`app/feeding-outbox.ts` queues every `xrawl/feed` and retries with backoff until
+the background acknowledges the write (the event id is bucketed by ten seconds,
+so a retry is paid once while two genuine meals stay two events).
+
 ### Tables (v7)
 
 | Table | Key | Purpose |
@@ -474,8 +490,14 @@ IndexedDB survives extension updates but not eviction or uninstall:
 
 - `unlimitedStorage` is declared, and `navigator.storage.persist()` is requested
   on first open (`src/data/resilience.ts`).
-- A creation marker is kept in `browser.storage.local`, which survives a wiped
-  database, so the UI can tell "new install" from "history lost".
+- The store records its own first open in `meta.createdAt`, and a creation
+  marker is kept in `browser.storage.local`, which survives a wiped database.
+  The popup compares the two: a marker that predates the store means the history
+  was reset, an absent marker means a new install (`describeHistory` in
+  `src/entrypoints/popup/main.ts`).
+- The embedding cache is trimmed oldest-first past its ceiling
+  (`EMBEDDING_CACHE_LIMIT`), and learned preference rows keep their strongest
+  evidence up to `PERSONALITY_ROW_LIMITS`, so no table grows without bound.
 - Export/import is the real backstop: it is the only thing that survives
   extension removal.
 
@@ -790,8 +812,12 @@ every word gets a word-level embedding (usually a cache hit), then only the top 
 are re-embedded with their sentence and re-scored.
 
 ```text
-priority = 0.6 * relevance + 0.25 * novelty + 0.15 * rarity + exploration
+priority = 0.4 * relevance + 0.3 * interest + 0.2 * novelty + 0.1 * rarity + exploration
 ```
+
+(The same formula is listed with its rationale under [Cognition](#cognition):
+semantic relevance, the browsing-interest channel, novelty, intrinsic rarity and
+the deterministic exploration bonus.)
 
 The creature then chooses by priority *and* proximity (75/25) rather than nearest
 word. Exploration is a **stable hash of the word**, not a random roll: a quarter of
@@ -811,10 +837,10 @@ always produces the same decision.
 ### Benchmarking on a phone
 
 `src/semantics/minilm.ts` records each inference batch (texts, milliseconds,
-backend) and exposes it as `modelStats()`; the popup shows the model state. Judge
-the budget there, not on a desktop: the first semantic use also pays the model
-download, and WASM on a midrange phone is roughly an order of magnitude slower
-than a laptop. The batch size (16) and the 24-candidate context limit are the two
+backend) as `EmbeddingProvider.stats()`, and the popup's Memory panel prints it
+beside the model state (`model ready · 16 texts 240 ms wasm`). Judge the budget
+there, not on a desktop: the first semantic use also pays the model download, and
+WASM on a midrange phone is roughly an order of magnitude slower than a laptop. The batch size (16) and the 24-candidate context limit are the two
 knobs that decide the cost.
 
 ### Privacy and cost
@@ -1019,7 +1045,12 @@ over `xrawl/creature-loadout`.
 - **Nested scrollers** re-measure only the scrolled element's subtree; multiple
   simultaneously scrolling containers would need one scoped pass each.
 - **Caps:** 20,000 targets per pass; 8,000 targets per exported snapshot
-  message (the download also uses the transport cap).
+  message (the download also uses the transport cap). Occlusion hit tests are
+  budgeted at 600 per pass (`scan.maxOcclusionChecks`): words past the budget
+  are reported as unoccluded for that pass, which is cheap and self-correcting.
+- **One vector space per session.** A model that finishes loading after the
+  fallback was committed is ignored for the rest of that session, and profiles
+  are model-scoped, so two spaces are never compared.
 - **Segmentation fallback** when `Intl.Segmenter` is unavailable is a Unicode
   letter/number regex (no dictionary-based CJK/Thai segmentation).
 - **Environment classification** is heuristic (URL/title/meta/small DOM probes)
@@ -1083,6 +1114,8 @@ over `xrawl/creature-loadout`.
 | `npm run build` | production Chrome MV3 build |
 | `npm run build:firefox` | Firefox MV2/MV3 build |
 | `npm run compile` | `tsc --noEmit` |
+| `npm run lint` | ESLint: layer boundaries, unsafe HTML, stray `console` |
+| `npm run check` | compile + lint + tests - the same sequence CI runs |
 | `npm test` | unit + integration tests (`vitest`, real IndexedDB via `fake-indexeddb`) |
 | `npm run test:watch` | same, in watch mode |
 | `npm run build:wordfreq` | regenerate the local frequency table from `small_en.msgpack.gz` |

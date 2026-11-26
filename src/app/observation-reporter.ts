@@ -94,6 +94,19 @@ export class ObservationReporter {
     this.lastTickAt = this.now();
   }
 
+  /**
+   * Undo `stop()` after a back/forward-cache restore.
+   *
+   * A bfcache page is frozen and thawed, not unloaded, so the reporter must
+   * accept snapshots again - otherwise browse time and word sightings stop for
+   * the rest of that page's life. The clock restarts at "now" rather than
+   * counting the time the page spent frozen.
+   */
+  restore(): void {
+    this.stopped = false;
+    this.lastTickAt = this.now();
+  }
+
   /** Final flush when the session closes or the page unloads. */
   stop(): void {
     if (this.stopped) return;

@@ -26,13 +26,25 @@ export interface FeedingEventInput {
   readonly xp?: number;
 }
 
+/**
+ * Bucket width used to make a feeding's id stable across a retried delivery.
+ *
+ * The id used to include the exact timestamp, so only a byte-identical resend
+ * deduped - a rebuilt retry (the content script re-queueing after a dropped
+ * message) would pay twice. Rounding the timestamp into ten-second buckets
+ * makes a retry land on the same id while two genuine meals cannot collide:
+ * the engine's own eat cooldown is 25 seconds for the same target.
+ */
+export const FEEDING_DEDUPE_WINDOW_MS = 10_000;
+
 export function feedingEventId(
   creatureId: string,
   word: string,
   eatenAt: number,
   fingerprint: string,
 ): string {
-  return stableKey('feed', creatureId, word, eatenAt, fingerprint);
+  const bucket = Number.isFinite(eatenAt) ? Math.floor(eatenAt / FEEDING_DEDUPE_WINDOW_MS) : 0;
+  return stableKey('feed', creatureId, word, bucket, fingerprint);
 }
 
 export function buildFeedingEvent(input: FeedingEventInput): FeedingEventRecord {
@@ -105,12 +117,12 @@ export async function countFeedingEvents(db: XrawlDatabase): Promise<number> {
 }
 
 /**
- * Newest-first history filtered by a word or a site.
+ * Newest-first history filtered by a word, a site, or a creature.
  *
- * Each filter uses an index so a journal page never scans the whole log. The
- * creature and source predicates are applied on top of the cursor, and the
- * total is counted in the same pass that produces the page (a filtered `count`
- * would walk the table twice for no benefit).
+ * Each filter uses an index. When no extra predicate is applied on top of the
+ * index, both the page and the total come from IndexedDB natively (`count` +
+ * `limit`), so nothing is deserialized for rows the caller will not see. Only a
+ * source filter, which is not indexed, needs a cursor over the range.
  */
 export async function queryFeedingEvents(
   db: XrawlDatabase,
@@ -138,11 +150,20 @@ export async function queryFeedingEvents(
             .between([filter.creatureId, -Infinity], [filter.creatureId, Infinity])
         : db.feedingEvents.orderBy('eatenAt');
 
+  // Fast path: the index answers both questions, so no row outside the page is
+  // ever materialized.
+  if (filter.source === undefined) {
+    const total = await source.count();
+    const entries = await source.reverse().offset(skip).limit(wanted).toArray();
+    return { entries, total, hasMore: total > skip + entries.length };
+  }
+
   let seen = 0;
   let total = 0;
   const entries: FeedingEventRecord[] = [];
 
-  // Newest first, one cursor, both the page and the total from it.
+  // Newest first, one cursor, both the page and the total from it. This path
+  // only exists because `source` has no index of its own.
   await source
     .reverse()
     .each((row) => {

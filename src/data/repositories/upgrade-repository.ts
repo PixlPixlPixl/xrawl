@@ -53,18 +53,3 @@ export async function upgradeLevel(db: XrawlDatabase, id: string): Promise<numbe
   return record?.level ?? 0;
 }
 
-export async function setUpgradeMeta(
-  db: XrawlDatabase,
-  id: string,
-  meta: Record<string, number | string | boolean>,
-  now: number,
-): Promise<UpgradeRecord | undefined> {
-  return db.transaction('rw', db.upgrades, async () => {
-    const existing = await db.upgrades.get(id);
-    if (!existing) return undefined;
-    existing.meta = { ...existing.meta, ...meta };
-    existing.updatedAt = now;
-    await db.upgrades.put(existing);
-    return existing;
-  });
-}

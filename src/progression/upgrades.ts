@@ -115,15 +115,6 @@ export function upgradeCost(definition: UpgradeDefinition, level: number): numbe
   return Math.round(definition.baseCost * Math.pow(definition.costGrowth, target - 1));
 }
 
-/** Total price of all levels up to and including the given level. */
-export function totalUpgradeCost(definition: UpgradeDefinition, level: number): number {
-  let total = 0;
-  for (let next = 1; next <= Math.max(0, Math.floor(level)); next += 1) {
-    total += upgradeCost(definition, next);
-  }
-  return total;
-}
-
 /**
  * Every catalog entry must have a creature-side effect. Checked at module load
  * so a renamed effect id fails loudly in development instead of silently

@@ -30,6 +30,7 @@ import { observeUrlChanges } from '@/platform/browser/navigation';
 import { ObservationReporter } from './observation-reporter';
 import { CreatureSession } from './creature-session';
 import { FeedingMode } from './feeding-mode';
+import { FeedingOutbox } from './feeding-outbox';
 import type { FeedingPayload } from '@/data/observation';
 import type { CreatureLoadoutSnapshot } from '@/shared/types/creature';
 
@@ -102,25 +103,23 @@ export function startContentSession(): void {
     isVisible: () => document.visibilityState !== 'hidden' && document.hasFocus(),
   });
 
-  // Focus and visibility control three things at once: browse-time accrual,
-  // and whether this tab is the one hosting the single persistent creature.
-  const syncPresence = (): void => {
-    const live = document.visibilityState !== 'hidden' && document.hasFocus();
-    creature.setPresent(live);
-    if (live) reporter.resume();
-    else reporter.pause();
-  };
-  document.addEventListener('visibilitychange', syncPresence);
-  window.addEventListener('blur', syncPresence);
-  window.addEventListener('focus', syncPresence);
+  // A feeding is the one message that is not periodic: a dropped delivery costs
+  // the word, its XP and its word points permanently. The outbox retries with
+  // backoff until the background acknowledges the write, and gives up on the
+  // oldest only if a page somehow accumulates dozens of undeliverable events.
+  const feedings = new FeedingOutbox({
+    deliver: (payload) =>
+      browser.runtime
+        .sendMessage({ type: 'xrawl/feed', payload })
+        .then((response: unknown) => (response as { ok?: boolean } | null)?.ok === true)
+        .catch(() => false),
+    timers: {
+      schedule: (callback, delayMs) => window.setTimeout(callback, delayMs),
+      cancel: (handle) => window.clearTimeout(handle),
+    },
+  });
 
-  const sendFeeding = (payload: FeedingPayload): void => {
-    try {
-      void browser.runtime.sendMessage({ type: 'xrawl/feed', payload }).catch(() => undefined);
-    } catch {
-      // Background worker unavailable during startup/shutdown.
-    }
-  };
+  const sendFeeding = (payload: FeedingPayload): void => feedings.push(payload);
 
   const creature = new CreatureSession({
     document,
@@ -129,6 +128,26 @@ export function startContentSession(): void {
     sessionId: reporter.sessionId,
     sendFeeding,
   });
+
+  // Focus and visibility control three things at once: browse-time accrual,
+  // queued feeding delivery, and whether this tab is the one hosting the single
+  // persistent creature. Declared after both of those exist, because the
+  // listeners below can fire at any moment.
+  const syncPresence = (): void => {
+    const live = document.visibilityState !== 'hidden' && document.hasFocus();
+    creature.setPresent(live);
+    if (live) {
+      reporter.resume();
+      // A tab regaining focus is a good moment to retry anything the background
+      // did not accept while the page was in the background.
+      feedings.flush();
+    } else {
+      reporter.pause();
+    }
+  };
+  document.addEventListener('visibilitychange', syncPresence);
+  window.addEventListener('blur', syncPresence);
+  window.addEventListener('focus', syncPresence);
 
   let creatureMode: CreatureMode = 'foraging';
   let trailingDistance: number = COMPANION_CONFIG.trailingDistancePx;
@@ -154,9 +173,9 @@ export function startContentSession(): void {
         ? null
         : { id: target.id, word: target.normalized, rects: target.rects };
     },
-    onFeed: (candidate) => {
-      creature.feed(candidate.id, candidate.word);
-    },
+    // Returning the engine's answer is what lets the highlight tell the user
+    // "that word is gone" instead of swallowing the click.
+    onFeed: (candidate) => creature.feed(candidate.id, candidate.word),
     onChange: (active) => {
       feedingActive = active;
     },
@@ -283,7 +302,20 @@ export function startContentSession(): void {
     schedulePriorities();
   });
 
-  window.addEventListener('pagehide', () => reporter.stop());
+  // pagehide also fires when the page goes into the back/forward cache. In that
+  // case the document is *not* over: stopping the reporter there ended
+  // observations (browse time and word sightings) for the rest of the page's
+  // life once the user came back. restore() is the mirror image of stop().
+  window.addEventListener('pagehide', (event) => {
+    if (!event.persisted) reporter.stop();
+  });
+  window.addEventListener('pageshow', (event) => {
+    if (!event.persisted) return;
+    reporter.restore();
+    syncPresence();
+    feedings.flush();
+  });
+  window.addEventListener('online', () => feedings.flush());
 
   const toggleOverlay = (visible: boolean): void => {
     overlay.setVisible(visible);
@@ -350,21 +382,36 @@ export function startContentSession(): void {
     );
   };
 
+  /**
+   * Bindings come from config, modifiers included: the handler used to hardcode
+   * Alt+Shift and one key code, which let the config drift away from what the
+   * extension actually listened for.
+   */
+  const matchesHotkey = (
+    hotkey: { readonly alt: boolean; readonly shift: boolean; readonly code: string },
+    event: KeyboardEvent,
+  ): boolean =>
+    event.code === hotkey.code &&
+    event.altKey === hotkey.alt &&
+    event.shiftKey === hotkey.shift &&
+    !event.ctrlKey &&
+    !event.metaKey;
+
   window.addEventListener('keydown', (event) => {
-    if (!event.altKey || !event.shiftKey || isTypingTarget(event)) return;
+    if (isTypingTarget(event)) return;
 
     // Alt+Shift+X: outlines. Alt+Shift+F: feed a word. Alt+Shift+M: mode.
-    if (event.code === XRAWL_CONFIG.feedingModeHotkey.code) {
+    if (matchesHotkey(XRAWL_CONFIG.feedingModeHotkey, event)) {
       event.preventDefault();
       setFeedingMode(!feedingActive);
       return;
     }
-    if (event.code === XRAWL_CONFIG.modeHotkey.code) {
+    if (matchesHotkey(XRAWL_CONFIG.modeHotkey, event)) {
       event.preventDefault();
       setMode(creatureMode === 'companion' ? 'foraging' : 'companion');
       return;
     }
-    if (event.code === 'KeyX') {
+    if (matchesHotkey(XRAWL_CONFIG.overlayHotkey, event)) {
       event.preventDefault();
       toggleOverlay(!overlay.isVisible);
     }

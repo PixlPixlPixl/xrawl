@@ -20,10 +20,12 @@ export const XRAWL_CONFIG = {
     storeContextStorageKey: 'xrawl.journal.storeContext',
   },
 
+  /** Hotkey that toggles the debug outlines. */
+  overlayHotkey: { alt: true, shift: true, code: 'KeyX' },
   /** Hotkey that toggles the manual feeding selection mode. */
   feedingModeHotkey: { alt: true, shift: true, code: 'KeyF' },
   /** Hotkey that toggles the gameplay mode. */
-    modeHotkey: { alt: true, shift: true, code: 'KeyM' },
+  modeHotkey: { alt: true, shift: true, code: 'KeyM' },
 
   scan: {
     /** Text nodes measured per animation frame before yielding to the page. */
@@ -68,6 +70,15 @@ export const XRAWL_CONFIG = {
     surroundingBlockLimit: 2_000,
     /** How often the URL is polled when the Navigation API is unavailable. */
     urlPollIntervalMs: 1_000,
+    /**
+     * Hit tests allowed per measurement pass when looking for opaque covers.
+     *
+     * Each check is an `elementsFromPoint` plus a style resolution, which is by
+     * far the most expensive thing a pass does; a budget keeps a word-dense page
+     * from turning occlusion detection into the main-thread cost. Words past the
+     * budget are reported as unoccluded for that pass and re-checked next time.
+     */
+    maxOcclusionChecks: 600,
   },
 
   overlay: {
@@ -98,7 +109,5 @@ export const XRAWL_CONFIG = {
     zIndex: '2147483645',
     /** Frame budget; a frame is skipped rather than run twice. */
     frameIntervalMs: 16,
-    /** How often the creature re-evaluates its target, in ms. */
-    targetRefreshMs: 900,
   },
 } as const;

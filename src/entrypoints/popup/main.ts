@@ -426,6 +426,21 @@ siteInterestSelect.addEventListener('change', () => {
   });
 });
 
+/**
+ * How old this world is, and whether it survived.
+ *
+ * `storage.local` keeps the creation marker across an evicted database, while
+ * the store's own `createdAt` row is wiped with it - so a marker that predates
+ * the store means the history was lost, not that the user is new.
+ */
+function describeHistory(status: DatabaseStatusPayload): string | null {
+  const marker = status.databaseCreatedAt;
+  if (marker === null) return status.createdAt === 0 ? null : 'new install';
+  if (status.createdAt > 0 && marker < status.createdAt - 60_000) return 'history reset';
+  const since = status.createdAt > 0 ? status.createdAt : marker;
+  return since > 0 ? `since ${new Date(since).toLocaleDateString()}` : null;
+}
+
 function renderDatabaseStatus(status: DatabaseStatusPayload | null): void {
   if (status === null) {
     dbVersion.textContent = '';
@@ -443,8 +458,9 @@ function renderDatabaseStatus(status: DatabaseStatusPayload | null): void {
       ? ''
       : ` \u00b7 ${topAffinity[0]} ${Math.round(topAffinity[1]! * 100)}%`;
 
+  const history = describeHistory(status);
   dbVersion.textContent = `v${status.schemaVersion}`;
-  dbCounts.textContent = `${status.vocabularyCount} words \u00b7 ${status.feedingCount} feedings \u00b7 lv ${progression.level} \u00b7 ${progression.xp} xp${affinityText}`;
+  dbCounts.textContent = `${status.vocabularyCount} words \u00b7 ${status.feedingCount} feedings \u00b7 lv ${progression.level} \u00b7 ${progression.xp} xp${affinityText}${history === null ? '' : ` \u00b7 ${history}`}`;
   wpBalance.textContent = `${progression.wordPoints} wp`;
 
   void refreshSiteInterest();
@@ -462,7 +478,15 @@ function renderDatabaseStatus(status: DatabaseStatusPayload | null): void {
           .map((entry) => `${entry.interest} ${Math.round(entry.weight * 100)}%`)
           .join(' \u00b7 ')
       : 'none';
-  dbInterests.textContent = `Browsing: ${browsing} | Learned: ${learnt} | model ${semantics.state}`;
+  // The model line doubles as the on-device budget: the last batch's size,
+  // duration and backend are the numbers that decide whether semantics are
+  // affordable on a phone.
+  const batch = semantics.lastBatch;
+  const modelLine =
+    batch === null
+      ? `model ${semantics.state}`
+      : `model ${semantics.state} \u00b7 ${batch.count} texts ${batch.ms} ms ${batch.device}`;
+  dbInterests.textContent = `Browsing: ${browsing} | Learned: ${learnt} | ${modelLine}`;
   renderUpgrades(status.upgrades);
 }
 

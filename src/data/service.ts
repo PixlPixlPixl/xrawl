@@ -80,6 +80,13 @@ export interface ProgressionStatus {
   readonly interests: ReadonlyArray<{ readonly interest: string; readonly weight: number }>;
 }
 
+/** Last inference batch: what the model cost, on this device, right now. */
+export interface SemanticBatchStatus {
+  readonly count: number;
+  readonly ms: number;
+  readonly device: 'wasm' | 'webgpu';
+}
+
 /** What the popup can say about the model and the learned interests. */
 export interface SemanticStatus {
   /** `idle`/`loading`/`ready`/`fallback`; loading is lazy and on first use. */
@@ -88,11 +95,21 @@ export interface SemanticStatus {
   /** Rounded attention shares, biggest first. Empty until something is eaten. */
   readonly profiles: ReadonlyArray<{ readonly category: string; readonly share: number }>;
   readonly embeddingCount: number;
+  /** Size/time/backend of the last batch, or null before the model has run. */
+  readonly lastBatch: SemanticBatchStatus | null;
 }
 
 export interface DatabaseStatus {
   readonly schemaVersion: number;
   readonly creatureId: string;
+  /**
+   * When this database was first opened, from its own `meta` table.
+   *
+   * Compared with the `storage.local` creation marker, this is what lets the
+   * UI say "history was reset" instead of quietly starting a new lineage: the
+   * marker outlives an evicted database, the `meta` row does not.
+   */
+  readonly createdAt: number;
   readonly vocabularyCount: number;
   readonly feedingCount: number;
   readonly storage: StorageEstimate | null;
@@ -179,6 +196,11 @@ export function createDatabaseService(options: DatabaseServiceOptions): Database
 
       const now = Date.now();
       await db.open();
+      // First open of this store: remember when, so a wiped-and-recreated
+      // database can be told apart from a brand new install later.
+      if ((await db.meta.get('createdAt')) === undefined) {
+        await db.meta.put({ key: 'createdAt', value: now });
+      }
       const species = getSpecies(options.speciesId ?? 'spider');
       await ensureCreature(db, {
         name: options.creatureName ?? 'Xrawl',
@@ -228,9 +250,13 @@ export function createDatabaseService(options: DatabaseServiceOptions): Database
       const xp = progression?.xp ?? 0;
       const progress = levelProgress(xp);
 
+      const createdAtRow = await db.meta.get('createdAt');
+      const createdAt = typeof createdAtRow?.value === 'number' ? createdAtRow.value : 0;
+
       return {
         schemaVersion: db.verno,
         creatureId: CREATURE_ID,
+        createdAt,
         vocabularyCount,
         feedingCount,
         storage,
@@ -251,6 +277,7 @@ export function createDatabaseService(options: DatabaseServiceOptions): Database
           model: semantics.model(),
           profiles,
           embeddingCount,
+          lastBatch: semantics.stats(),
         },
       };
     },

@@ -26,6 +26,25 @@ export async function listPersonality(
   return db.personality.orderBy('updatedAt').reverse().limit(limit).toArray();
 }
 
+/**
+ * Rows kept per kind.
+ *
+ * `preference` gains one row per eaten word, so without a ceiling the table
+ * would grow forever - and since the reward reads only the newest rows, the
+ * oldest would quietly stop mattering while still costing storage. Trimming
+ * keeps the strongest evidence and forgets the weakest.
+ */
+const PERSONALITY_ROW_LIMITS: Readonly<Record<PersonalityKind, number>> = {
+  preference: 600,
+  interest: 64,
+  trait: 64,
+};
+
+/** Keep-score for trimming: strong *and* well-evidenced rows survive. */
+function strength(record: PersonalityRecord): number {
+  return Math.abs(record.value) * record.confidence;
+}
+
 export interface PersonalityDelta {
   readonly kind: PersonalityKind;
   readonly key: string;
@@ -76,17 +95,28 @@ export async function applyPersonalityDelta(
       lastEvidenceAt: delta.now,
     };
     await db.personality.add(created);
+    // Only a new row can push the table over its ceiling.
+    await trimPersonality(db, delta.kind);
     return created;
   });
 }
 
-export async function setPersonality(
-  db: XrawlDatabase,
-  record: Omit<PersonalityRecord, 'id'>,
-): Promise<PersonalityRecord> {
-  const withId: PersonalityRecord = { ...record, id: personalityId(record.kind, record.key) };
-  await db.personality.put(withId);
-  return withId;
+/** Drop the weakest rows of one kind once it exceeds its cap. */
+async function trimPersonality(db: XrawlDatabase, kind: PersonalityKind): Promise<void> {
+  const cap = PERSONALITY_ROW_LIMITS[kind];
+  if (!Number.isFinite(cap) || cap <= 0) return;
+
+  const rows = await db.personality
+    .where('[kind+updatedAt]')
+    .between([kind, -Infinity], [kind, Infinity])
+    .toArray();
+  if (rows.length <= cap) return;
+
+  const ranked = [...rows].sort(
+    (left, right) => strength(right) - strength(left) || right.updatedAt - left.updatedAt,
+  );
+  const doomed = ranked.slice(cap).map((row) => row.id);
+  if (doomed.length > 0) await db.personality.bulkDelete(doomed);
 }
 
 function clamp11(value: number): number {

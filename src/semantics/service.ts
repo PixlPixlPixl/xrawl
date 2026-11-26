@@ -13,7 +13,7 @@
  */
 import { EMBEDDING_DIMENSIONS, FALLBACK_EMBEDDING_MODEL } from '@/progression/semantics';
 import { lexicalProvider } from './lexical';
-import type { EmbeddingProvider } from './provider';
+import type { EmbeddingBatchStats, EmbeddingProvider } from './provider';
 
 export type SemanticState = 'idle' | 'loading' | 'ready' | 'fallback';
 
@@ -26,6 +26,8 @@ export interface SemanticService {
   prepare(): Promise<EmbeddingProvider>;
   /** Embed texts with the chosen provider, batching is the provider's job. */
   embed(texts: readonly string[]): Promise<number[][]>;
+  /** Last inference batch (size, milliseconds, backend), when there was one. */
+  stats(): EmbeddingBatchStats | null;
 }
 
 export interface SemanticServiceOptions {
@@ -64,21 +66,36 @@ export function createSemanticService(options: SemanticServiceOptions = {}): Sem
     return next;
   };
 
+  /**
+   * The decision is made exactly once. A model that finishes loading *after*
+   * the deadline already committed the fallback is discarded for this session:
+   * profiles hashed in the fallback space cannot be compared with MiniLM
+   * vectors, so flipping would silently reset what the creature had learned.
+   * (The pipeline itself stays warm in `minilm.ts`, so the next session - or
+   * the next service worker - starts on the model.)
+   */
+  const settle = (next: EmbeddingProvider, nextState: SemanticState): EmbeddingProvider => {
+    if (decided && provider !== null) return provider;
+    return commit(next, nextState);
+  };
+
   const prepare = (): Promise<EmbeddingProvider> => {
     if (provider) return Promise.resolve(provider);
     if (decidedPromise) return decidedPromise;
 
     state = 'loading';
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
     const attempt = load().then(
-      (loaded) => commit(loaded, 'ready'),
+      (loaded) => settle(loaded, 'ready'),
       (error: unknown) => {
         options.logger?.('semantic model unavailable; using lexical fallback', error);
-        return commit(fallback, 'fallback');
+        return settle(fallback, 'fallback');
       },
     );
 
     const deadline = new Promise<EmbeddingProvider>((resolve) => {
-      setTimeout(() => {
+      timer = setTimeout(() => {
         if (decided) return;
         options.logger?.(`semantic model still loading after ${timeoutMs}ms; using fallback`, null);
         resolve(commit(fallback, 'fallback'));
@@ -86,7 +103,10 @@ export function createSemanticService(options: SemanticServiceOptions = {}): Sem
     });
 
     decidedPromise = Promise.race([attempt, deadline]).then((resolved) => {
-      // A late model success must not flip the space mid-session.
+      // The deadline is no longer useful once the race is over, and leaving it
+      // armed keeps a service worker alive for nothing.
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
       return resolved;
     });
     return decidedPromise;
@@ -104,5 +124,6 @@ export function createSemanticService(options: SemanticServiceOptions = {}): Sem
       }
       return chosen.embed(texts);
     },
+    stats: () => provider?.stats?.() ?? null,
   };
 }

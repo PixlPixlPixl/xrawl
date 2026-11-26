@@ -24,7 +24,6 @@ export const UPGRADE_EFFECTS: Record<
 > = {
   // Movement upgrade: the user's own example.
   'locomotion.speed': (level) => ({ movementSpeed: 1 + level * 0.18 }),
-  'locomotion.stride': () => ({}),
   'digestion.rate': (level) => ({ eatingSpeed: 1 + level * 0.22 }),
   'senses.reach': (level) => ({ detectionRadius: 1 + level * 0.15 }),
   'senses.vocabulary': (level) => ({ maximumWordLength: 1 + level * 0.25 }),

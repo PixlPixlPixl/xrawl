@@ -7,20 +7,8 @@ export const CREATURE_CONFIG = {
   /** Acceptable foot error, in CSS px, before another iteration runs. */
   fabrikEpsilon: 0.35,
 
-  /** Width of each walking band, as a fraction of the body height. */
-  bandSpacing: 1.15,
-  /** How far behind the body centre a foot may rest, in limb reaches. */
-  maxStepBehind: 1.35,
-
-  /** Fraction of gait period a single foot spends in the air. */
-  stepDuty: 0.42,
-  /** Fraction of the gait period shifted between alternating groups. */
-  groupPhase: 0.5,
-
   /** Body bob amplitude in CSS px, proportional to movement speed. */
   bounceAmplitude: 1.6,
-  /** Bob cycles per stride. */
-  bounceCycles: 2,
 
   /** How many body-widths of lead the creature keeps when following a word. */
   followLead: 0.8,
@@ -43,8 +31,6 @@ export const CREATURE_CONFIG = {
    */
   eatCooldownSeconds: 25,
 
-  /** Renderer: how many trail samples to remember for heading smoothing. */
-  headingSamples: 5,
   /** Maximum turning rate, radians per second (keeps turns readable). */
   maxTurnRate: 7.5,
   /** Stop translating when the target is this close, in CSS px. */

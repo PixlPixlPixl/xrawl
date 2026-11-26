@@ -12,7 +12,7 @@
  */
 import type { FeatureExtractionPipeline } from '@huggingface/transformers';
 import { EMBEDDING_DIMENSIONS, EMBEDDING_MODEL } from '@/progression/semantics';
-import type { EmbeddingProvider } from './provider';
+import type { EmbeddingBatchStats, EmbeddingProvider } from './provider';
 
 /** Texts per forward pass. Big enough to amortise overhead, small enough to stay responsive. */
 const BATCH_SIZE = 16;
@@ -20,13 +20,34 @@ const BATCH_SIZE = 16;
 let pipelinePromise: Promise<FeatureExtractionPipeline> | null = null;
 /** Which backend the pipeline actually chose (not which was hoped for). */
 let loadedDevice: 'wasm' | 'webgpu' = 'wasm';
-/** Last batch timing, for on-device benchmarks (see `modelStats`). */
-let lastBatch: { count: number; ms: number; device: 'wasm' | 'webgpu' } | null = null;
+/** Last batch timing, surfaced through `EmbeddingProvider.stats`. */
+let lastBatch: EmbeddingBatchStats | null = null;
 
-function runtimeUrl(path: string): string | null {
-  const runtime = (globalThis as { browser?: { runtime?: { getURL?: (p: string) => string } } })
-    .browser?.runtime;
-  return runtime?.getURL ? runtime.getURL(path) : null;
+/** The slice of an extension runtime this module needs to resolve a path. */
+export interface RuntimeLike {
+  getURL?: (path: string) => string;
+}
+
+function extensionRuntime(): RuntimeLike | null {
+  const globals = globalThis as {
+    browser?: { runtime?: RuntimeLike };
+    chrome?: { runtime?: RuntimeLike };
+  };
+  return globals.browser?.runtime ?? globals.chrome?.runtime ?? null;
+}
+
+/**
+ * URL of the ONNX Runtime binaries shipped in `public/ort`, or null on a host
+ * with no extension runtime (a bare page, a unit test).
+ *
+ * Both globals are checked: Chrome has no `browser` global (WXT's `browser` is
+ * `chrome` there), so reading `globalThis.browser` alone left `wasmPaths`
+ * unset and sent ORT to its CDN default, which the extension CSP blocks - the
+ * model then failed to load and the session silently stayed on the lexical
+ * fallback for every Chrome user.
+ */
+export function bundledOrtBase(runtime: RuntimeLike | null = extensionRuntime()): string | null {
+  return typeof runtime?.getURL === 'function' ? runtime.getURL('ort/') : null;
 }
 
 async function detectDevice(): Promise<'webgpu' | 'wasm'> {
@@ -51,8 +72,9 @@ async function createPipeline(): Promise<FeatureExtractionPipeline> {
   env.useBrowserCache = true;
 
   // WASM binaries ship inside the extension (public/ort) when the build copied
-  // them; otherwise transformers.js falls back to its CDN default.
-  const wasmBase = runtimeUrl('ort/');
+  // them; otherwise transformers.js falls back to its CDN default, which the
+  // extension's own CSP refuses.
+  const wasmBase = bundledOrtBase();
   const wasm = env.backends?.onnx?.wasm;
   if (wasmBase !== null && wasm) {
     wasm.wasmPaths = wasmBase;
@@ -136,8 +158,8 @@ export const miniLmProvider: EmbeddingProvider = {
       const output = await extractor(batch, { pooling: 'mean', normalize: true });
       vectors.push(...vectorsFrom(output));
 
-      // Recorded rather than logged: the mobile budget is measured by reading
-      // `modelStats()` from the popup or a debug panel, without console noise.
+      // Recorded rather than logged: the mobile budget is measured from the
+      // popup's model line, without console noise.
       lastBatch = { count: batch.length, ms: Date.now() - startedAt, device: loadedDevice };
     }
 
@@ -146,19 +168,5 @@ export const miniLmProvider: EmbeddingProvider = {
     }
     return vectors;
   },
+  stats: () => lastBatch,
 };
-
-/** The backend in use, once the pipeline exists. */
-export function currentDevice(): 'wasm' | 'webgpu' {
-  return loadedDevice;
-}
-
-/**
- * Last inference batch: size, milliseconds, backend.
- *
- * This is the number that decides whether semantic features are affordable on a
- * midrange phone; `null` until the model has actually run once.
- */
-export function modelStats(): { count: number; ms: number; device: 'wasm' | 'webgpu' } | null {
-  return lastBatch;
-}

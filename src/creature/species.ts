@@ -187,8 +187,6 @@ export const SPECIES: readonly SpeciesDefinition[] = [
   },
 ];
 
-export const DEFAULT_SPECIES_ID = 'spider';
-
 export function getSpecies(id: string): SpeciesDefinition {
   return SPECIES.find((species) => species.id === id) ?? SPECIES[0]!;
 }

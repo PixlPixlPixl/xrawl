@@ -28,7 +28,22 @@ export interface EmbeddingRequest {
 
 export interface EmbedRequestOptions {
   readonly now: number;
+  /**
+   * Cache ceiling for this write. Defaults to `EMBEDDING_CACHE_LIMIT`; tests
+   * inject a small one so the eviction order can be checked without writing
+   * twenty thousand vectors.
+   */
+  readonly cacheLimit?: number;
 }
+
+/**
+ * Cache ceiling, in rows.
+ *
+ * Vectors are a cache, so evicting one only costs a re-inference later - but
+ * an unbounded cache on an article-heavy browser would grow the database
+ * forever. Oldest-first eviction keeps the words and sentences in current use.
+ */
+export const EMBEDDING_CACHE_LIMIT = 20_000;
 
 function isValidVector(vector: readonly number[], dimensions: number): boolean {
   if (vector.length !== dimensions) return false;
@@ -105,23 +120,29 @@ export async function embedWithCache(
     });
   }
 
-  if (rows.length > 0) await db.embeddings.bulkPut(rows);
+  if (rows.length > 0) {
+    await db.embeddings.bulkPut(rows);
+    await pruneEmbeddings(db, options.cacheLimit ?? EMBEDDING_CACHE_LIMIT);
+  }
 
   return results.map((vector) => vector ?? []);
 }
 
-/** Cached vector for one text, or null when it has never been embedded. */
-export async function readCachedEmbedding(
-  db: XrawlDatabase,
-  model: string,
-  dimensions: number,
-  request: EmbeddingRequest,
-): Promise<number[] | null> {
-  const hash = stableKey('text', request.text, request.subjectType);
-  const id = buildEmbeddingId(model, dimensions, request.subjectType, hash);
-  const row = await db.embeddings.get(id);
-  if (!row || row.model !== model || !isValidVector(row.vector, dimensions)) return null;
-  return row.normalized ? Array.from(row.vector) : normalizeVector(row.vector);
+/**
+ * Evict the least recently written vectors when the cache is over its ceiling.
+ *
+ * Runs only after new rows were written, so a cache that is merely being read
+ * never pays for a count. `limit` is injectable so the eviction order can be
+ * tested without writing twenty thousand vectors.
+ */
+async function pruneEmbeddings(db: XrawlDatabase, limit: number): Promise<number> {
+  const cap = Math.max(0, Math.floor(limit));
+  const total = await db.embeddings.count();
+  if (total <= cap) return 0;
+
+  const doomed = await db.embeddings.orderBy('updatedAt').limit(total - cap).primaryKeys();
+  if (doomed.length > 0) await db.embeddings.bulkDelete(doomed);
+  return doomed.length;
 }
 
 export async function countEmbeddings(db: XrawlDatabase): Promise<number> {

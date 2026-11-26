@@ -141,22 +141,3 @@ function bodyBob(action: CreatureAction, time: number): number {
       return 0;
   }
 }
-
-/** Reach the creature can cover with one stride, for camera framing. */
-export function poseBounds(pose: CreaturePose): { minX: number; minY: number; maxX: number; maxY: number } {
-  let minX = pose.body.cx - pose.body.rx;
-  let maxX = pose.body.cx + pose.body.rx;
-  let minY = pose.body.cy - pose.body.ry;
-  let maxY = pose.body.cy + pose.body.ry;
-
-  for (const limb of pose.limbs) {
-    for (const joint of limb.joints) {
-      if (joint.x < minX) minX = joint.x;
-      if (joint.x > maxX) maxX = joint.x;
-      if (joint.y < minY) minY = joint.y;
-      if (joint.y > maxY) maxY = joint.y;
-    }
-  }
-
-  return { minX, minY, maxX, maxY };
-}

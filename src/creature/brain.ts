@@ -35,6 +35,14 @@ export interface BrainInput {
   readonly satiety: number;
   /** True while a target was eaten and is digesting. */
   readonly digesting: boolean;
+  /**
+   * True while the current target is one the *user* picked.
+   *
+   * A deliberate pick outranks rest and detection range: if clicking a word
+   * only worked when the creature happened to be nearby and awake, "manual
+   * feeding" would look broken rather than deliberate.
+   */
+  readonly manual: boolean;
 }
 
 export interface BrainDecision {
@@ -82,6 +90,7 @@ export function decideAction(input: BrainInput): BrainDecision {
       return stay('foraging');
 
     case 'idle':
+      if (input.manual) return stay('approaching');
       if (inRange) return stay('approaching');
       if (input.actionElapsed > CREATURE_CONFIG.restAfterIdleSeconds) {
         return { action: 'resting', dropTarget: false };
@@ -91,7 +100,9 @@ export function decideAction(input: BrainInput): BrainDecision {
     case 'resting':
       // Rest is about digestion, not proximity: waking the moment a word
       // appears would make a full creature oscillate rest/approach forever.
-      // A very close, very interesting word can still rouse it early.
+      // A deliberate pick is the exception - the user asked for that word, and
+      // "nothing happened" right after a meal is the worst possible answer.
+      if (input.manual) return stay('approaching');
       if (input.satiety < 0.35 && inRange && input.distance < input.detectionRadius * 0.4) {
         return stay('approaching');
       }

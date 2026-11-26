@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege: CI only reads the repository. Nothing here writes a tag, a
+# comment or a release, so the default token needs no more than that.
+permissions:
+  contents: read
+
+# Actions are pinned to commit SHAs (the tag is in the comment) so a moved tag
+# cannot change what runs against this repository. Dependabot can bump them.
+jobs:
+  # Fast gate: types, lint and the unit/integration suite. No browser needed.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # Do not leave the runner token in .git/config.
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run compile
+      - run: npm run lint
+      - run: npm test
+
+  # Real-browser acceptance suite: builds the extension and drives it in Chrome.
+  # Perception and rendering are only honest when a browser is doing the layout,
+  # so this job is what keeps test/verify.mjs from rotting.
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # The runner image ships Google Chrome; xvfb supplies a display for the
+      # headed context the extension needs.
+      - run: sudo apt-get update && sudo apt-get install -y xvfb
+      - run: npm run verify:headless

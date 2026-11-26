@@ -109,11 +109,3 @@ export async function summarizeInterestProfiles(
     .map((row) => ({ category: row.category, share: Math.round(row.weight * 100) / 100 }));
 }
 
-export async function countInterestProfiles(db: XrawlDatabase): Promise<number> {
-  return db.interestProfiles.count();
-}
-
-/** Forget every learned interest (used by an explicit reset, not by scoring). */
-export async function clearInterestProfiles(db: XrawlDatabase): Promise<void> {
-  await db.interestProfiles.clear();
-}
