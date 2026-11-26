@@ -7,6 +7,8 @@ import type {
   DatabaseStatusPayload,
   DownloadResult,
   ExportPayload,
+  SetSiteInterestPayload,
+  SiteInterestPayload,
   StatusPayload,
   UpgradePurchasePayload,
 } from '@/shared/types/messaging';
@@ -14,6 +16,12 @@ import type {
 function elementById(id: string): HTMLElement {
   const element = document.getElementById(id);
   if (element === null) throw new Error(`Popup element #${id} is missing`);
+  return element;
+}
+
+function selectById(id: string): HTMLSelectElement {
+  const element = document.getElementById(id);
+  if (!(element instanceof HTMLSelectElement)) throw new Error(`Popup select #${id} is missing`);
   return element;
 }
 
@@ -49,6 +57,8 @@ const dbExportButton = buttonById('db-export');
 const dbImportInput = document.getElementById('db-import-input');
 const upgradeList = elementById('upgrade-list');
 const wpBalance = elementById('wp-balance');
+const siteInterestSummary = elementById('site-interest-summary');
+const siteInterestSelect = selectById('site-interest-select');
 
 let tabId: number | null = null;
 let lastStatus: StatusPayload | null = null;
@@ -105,6 +115,7 @@ function renderStatus(status: StatusPayload): void {
 
   const stats = status.stats;
   pageTitle.textContent = status.page.title || '(untitled page)';
+  void refreshSiteInterest();
   pageUrl.textContent = status.page.url;
   pageUrl.title = status.page.url;
 
@@ -266,6 +277,90 @@ downloadButton.addEventListener('click', () => {
 /* World memory (background-owned database)                           */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/* Site interest override (per host)                                  */
+/* ------------------------------------------------------------------ */
+
+let siteHost: string | null = null;
+
+function hostOfPage(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '').toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Show what this host teaches, and offer an override.
+ *
+ * The popup never guesses: the background resolves the host rule, the user
+ * override and the page kind, then sends both the result and the option list.
+ */
+async function refreshSiteInterest(): Promise<void> {
+  const status = lastStatus;
+  const host = status === null ? '' : hostOfPage(status.page.url);
+  if (status === null || host.length === 0) {
+    siteHost = null;
+    siteInterestSummary.textContent = 'not available on this tab';
+    siteInterestSelect.replaceChildren();
+    siteInterestSelect.disabled = true;
+    return;
+  }
+  siteHost = host;
+
+  const response = await sendRuntimeMessage<SiteInterestPayload>({
+    type: 'xrawl/site-interest',
+    host,
+    environment: status.environment.kind,
+  });
+  if (!response?.ok || siteHost !== host) return;
+  const site = response.data;
+
+  const auto = document.createElement('option');
+  auto.value = '';
+  auto.textContent = 'Automatic';
+  const options: HTMLOptionElement[] = [auto];
+  for (const kind of site.kinds) {
+    const option = document.createElement('option');
+    option.value = kind.id;
+    option.textContent = kind.label;
+    options.push(option);
+  }
+  siteInterestSelect.replaceChildren(...options);
+  siteInterestSelect.value = site.override ?? '';
+  siteInterestSelect.disabled = false;
+
+  const detected = site.interests
+    .map((entry) => `${entry.interest} ${Math.round(entry.weight * 100)}%`)
+    .join(' \u00b7 ');
+  siteInterestSummary.textContent = site.override
+    ? `${site.host} \u2192 ${site.override} (override)`
+    : `${site.host} \u2192 ${detected.length > 0 ? detected : 'no interest detected'}`;
+}
+
+siteInterestSelect.addEventListener('change', () => {
+  const host = siteHost;
+  if (host === null) return;
+  const interest = siteInterestSelect.value.length > 0 ? siteInterestSelect.value : null;
+  void sendRuntimeMessage<SetSiteInterestPayload>({
+    type: 'xrawl/set-site-interest',
+    host,
+    interest,
+  }).then((response) => {
+    if (!response?.ok) {
+      showError('Could not save the site override.');
+      return;
+    }
+    showMessage(
+      interest === null
+        ? 'Site interest is automatic again.'
+        : `This site now teaches ${interest}.`,
+    );
+    void refreshSiteInterest();
+  });
+});
+
 function renderDatabaseStatus(status: DatabaseStatusPayload | null): void {
   if (status === null) {
     dbVersion.textContent = '';
@@ -287,6 +382,8 @@ function renderDatabaseStatus(status: DatabaseStatusPayload | null): void {
   dbCounts.textContent = `${status.vocabularyCount} words \u00b7 ${status.feedingCount} feedings \u00b7 lv ${progression.level} \u00b7 ${progression.xp} xp${affinityText}`;
   wpBalance.textContent = `${progression.wordPoints} wp`;
 
+  void refreshSiteInterest();
+
   const semantics = status.semantics;
   const learnt =
     semantics.profiles.length > 0
@@ -294,7 +391,13 @@ function renderDatabaseStatus(status: DatabaseStatusPayload | null): void {
           .map((profile) => `${profile.category} ${Math.round(profile.share * 100)}%`)
           .join(' \u00b7 ')
       : 'nothing yet';
-  dbInterests.textContent = `Interests: ${learnt} \u00b7 model ${semantics.state}`;
+  const browsing =
+    progression.interests.length > 0
+      ? progression.interests
+          .map((entry) => `${entry.interest} ${Math.round(entry.weight * 100)}%`)
+          .join(' \u00b7 ')
+      : 'none';
+  dbInterests.textContent = `Browsing: ${browsing} | Learned: ${learnt} | model ${semantics.state}`;
   renderUpgrades(status.upgrades);
 }
 

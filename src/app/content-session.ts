@@ -85,8 +85,18 @@ export function startContentSession(): void {
         // Background worker unavailable during startup/shutdown.
       }
     },
-    isVisible: () => document.visibilityState !== 'hidden',
+    // Browse time requires all three: the document visible, its tab active, and
+    // the browser window focused. `hasFocus()` is the only signal a content
+    // script has for the latter two, and it is false for a background tab.
+    isVisible: () => document.visibilityState !== 'hidden' && document.hasFocus(),
   });
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') reporter.pause();
+    else reporter.resume();
+  });
+  window.addEventListener('blur', () => reporter.pause());
+  window.addEventListener('focus', () => reporter.resume());
 
   const sendFeeding = (payload: FeedingPayload): void => {
     try {

@@ -59,14 +59,17 @@ interface Harness {
   tick(ms: number): void;
 }
 
-function harness(options: { visible?: boolean; heartbeatMs?: number } = {}): Harness {
+function harness(
+  options: { visible?: boolean; heartbeatMs?: number } = {},
+): Harness & { setVisible(visible: boolean): void } {
   let clock = 0;
+  let visible = options.visible ?? true;
   const sent: ObservationPayload[] = [];
   const reporter = new ObservationReporter({
     send: (payload) => sent.push(payload),
     heartbeatMs: options.heartbeatMs ?? 15_000,
     now: () => clock,
-    isVisible: () => options.visible ?? true,
+    isVisible: () => visible,
   });
 
   return {
@@ -74,6 +77,9 @@ function harness(options: { visible?: boolean; heartbeatMs?: number } = {}): Har
     sent,
     tick(ms) {
       clock += ms;
+    },
+    setVisible(value) {
+      visible = value;
     },
   };
 }
@@ -166,6 +172,30 @@ describe('ObservationReporter', () => {
     h.reporter.stop();
     const final = h.sent[h.sent.length - 1]!;
     expect(final.activeMs).toBe(0);
+  });
+
+  it('stops counting when the window loses focus, and restarts on focus', () => {
+    const h = harness({ heartbeatMs: 1_000 });
+    h.reporter.observe(snapshot('https://a.test/x', ['fox']));
+
+    // Five focused seconds.
+    h.tick(5_000);
+    h.reporter.pause();
+    h.setVisible(false);
+
+    // A minute in a background tab: not browse time.
+    h.tick(60_000);
+    h.reporter.observe(snapshot('https://a.test/x', ['fox']));
+    const whileBlurred = h.sent[h.sent.length - 1]!;
+    expect(whileBlurred.activeMs).toBe(5_000);
+
+    // Back in focus: the clock restarts where it was paused.
+    h.setVisible(true);
+    h.reporter.resume();
+    h.tick(2_000);
+    h.reporter.observe(snapshot('https://a.test/x', ['fox']));
+    const afterFocus = h.sent[h.sent.length - 1]!;
+    expect(afterFocus.activeMs).toBe(2_000);
   });
 
   it('flushes the open page once on stop and then goes quiet', () => {

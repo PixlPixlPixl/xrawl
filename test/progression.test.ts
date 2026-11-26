@@ -437,6 +437,8 @@ describe('upgrade purchases', () => {
       discoveries: 0,
       environments: {},
       affinities: {},
+      interests: {},
+      interestsUpdatedAt: 0,
       updatedAt: nowAt(0),
     });
 
@@ -490,6 +492,8 @@ describe('upgrade purchases', () => {
       discoveries: 0,
       environments: {},
       affinities: {},
+      interests: {},
+      interestsUpdatedAt: 0,
       updatedAt: nowAt(0),
     });
 

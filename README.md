@@ -386,6 +386,8 @@ DevTools to add/remove a paragraph; hover words to inspect targets.
 | content → background | `xrawl/observe` | browse-time + word deltas for the database |
 | content → background | `xrawl/feed` | one feeding event (append-only, `source` says who chose it) |
 | content → background | `xrawl/prioritize` | rank visible words against learned interests |
+| popup → background | `xrawl/site-interest` | what this host teaches, plus the option list |
+| popup → background | `xrawl/set-site-interest` | set or clear (`null`) a host override |
 | content → background | `xrawl/creature-loadout` | resolved genetics + purchase levels |
 | popup → background | `xrawl/db-status` | schema version, counts, storage, progression, model state |
 | popup → background | `xrawl/db-export` | whole-database JSON envelope |
@@ -408,7 +410,7 @@ content script ──xrawl/observe──▶ background ──▶ DatabaseService
                 ──xrawl/feed────▶             (lazy open, single instance)
 ```
 
-### Tables (v5)
+### Tables (v6)
 
 | Table | Key | Purpose |
 | --- | --- | --- |
@@ -422,6 +424,7 @@ content script ──xrawl/observe──▶ background ──▶ DatabaseService
 | `personality` | `kind:key` | Learned interests/traits as bounded values with confidence |
 | `embeddings` | derived | Vectors keyed by model **and** dimensions |
 | `interestProfiles` | `category` | Learned interest vectors plus their share of the attention pool |
+| `interestOverrides` | `host` | The user's declared interest for one site |
 | `meta` | `key` | Schema bookkeeping, not game data |
 
 Design notes that matter later:
@@ -639,8 +642,10 @@ like environment affinity. Attention shifts; it never accumulates.
 | Input | Weight | Why |
 | --- | --- | --- |
 | Manual feeding | 0.5 | the user chose the word on purpose |
-| Environment exposure | 0.15 | a minute somewhere is weaker evidence (one step per 45 s of visible time) |
 | Autonomous feeding | 0.08 | its own foraging must not become self-reinforcing |
+
+(Browsing time is deliberately not a profile influence; it is its own channel,
+below.)
 
 The word is embedded **with its sentence**, so `database` in a cooking article and
 `database` in a compiler article pull in different directions. The blend rate slows
@@ -648,6 +653,56 @@ as a profile gathers evidence (`influence / (1 + observations / 6)`), so early
 learning is fast and later learning refines instead of thrashing. Anything closer
 to nothing than to an interest lands on `general` rather than bending its nearest
 neighbour.
+
+### Environment interests (no model)
+
+Browsing develops **broad interests** with no model at all, because a host name
+and a word list are enough to answer "what is this page about".
+
+| Environment | Hosts / signals | Interest |
+| --- | --- | --- |
+| Technology | github, gitlab, stackoverflow, npm, developer.* | technology |
+| Food | allrecipes, seriouseats, bbcgoodfood, recipe.* | cooking |
+| Science | arxiv, pubmed, nature, science.org, journals.* | science |
+| News | bbc, reuters, nytimes, politico, news.* | news |
+| General reading | wikipedia, blogs, anything else | general |
+
+`src/progression/interests.ts` owns the host rules, the page-kind fallback
+(`code` → technology, `article` → general, `email` → nothing) and the keyword
+lists that decide whether a *word* belongs to an interest. The classifier in
+`src/world/environment/classifier.ts` supplies the page kind; the host rules are
+checked first because `github.com` is technology even when the page reads like an
+article.
+
+**Only focused time counts.** A step is 45 s of a page being simultaneously
+visible, in the active tab, and in a focused window (`document.hasFocus()`), with
+the reporter pausing on blur and on `visibilitychange`. A tab left open overnight
+cannot rewire the creature.
+
+**Interests decay.** Each interest is a 0..1 weight with a 14-day half-life,
+decayed lazily from `interestsUpdatedAt`: nothing runs in the background, and
+last month's recipe blog does not keep it hungry for cooking. Exposure saturates
+(90 s of reading covers ~63% of the remaining gap to 1), so a long visit matters
+but an endless one does not dominate, and weights below 0.02 are forgotten.
+
+**Users can override any host.** The popup's *This site* section shows what the
+current host teaches and offers Automatic / Technology / Food / Science / News /
+General. The choice is stored in `interestOverrides` keyed by host, so it applies
+to every future visit; *Automatic* deletes the row rather than storing an opinion.
+
+**Three channels, deliberately different sizes.**
+
+| Channel | Effect | Where |
+| --- | --- | --- |
+| Browsing time | broad interests (0..1, decayed, no AI) | `progression/interests.ts` |
+| Manual feeding | specific preference (strong) | `data/cognition.ts` (embeddings) |
+| Autonomous feeding | reinforces existing preference, gradually | `data/cognition.ts` (embeddings) |
+
+They meet only in hunting: `priority = 0.4 * semantic + 0.3 * browsing + 0.2 *
+novelty + 0.1 * rarity + exploration`. Because browsing contributes 30%, the
+creature chases technology words after a GitHub afternoon even before a single
+word has been fed - and because semantic preference is capped at 40%, browsing
+time can never fully dictate its personality.
 
 ### Hunting
 

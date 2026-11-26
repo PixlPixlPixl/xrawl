@@ -293,6 +293,42 @@ button:disabled {
   min-height: 12px;
 }
 
+.site-interest {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 8px 10px;
+  display: grid;
+  gap: 6px;
+}
+
+.site-interest h3 {
+  margin: 0;
+  font-size: 9px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.site-interest-label {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+#site-interest-select {
+  font: inherit;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 5px 8px;
+}
+
+#site-interest-select:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+
 .upgrades {
   background: var(--panel);
   border: 1px solid var(--border);

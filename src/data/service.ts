@@ -32,13 +32,22 @@ import { countFeedingEvents } from './repositories/feeding-repository';
 import { countVocabulary } from './repositories/vocabulary-repository';
 import { summarizeInterestProfiles } from './repositories/interest-profile-repository';
 import {
-  evolveFromExposure,
   evolveFromFeeding,
   prioritizeWords,
   type CognitionSnapshot,
   type PriorityRequest,
   type WordPriority,
 } from './cognition';
+import {
+  describeSite,
+  readInterests,
+  recordBrowsingExposure,
+  setSiteOverride,
+  type BrowsingExposureInput,
+  type BrowsingExposureResult,
+} from './interests';
+import type { InterestKind } from '@/progression/interests';
+import type { EnvironmentKind } from '@/shared/types/page';
 import { countEmbeddings } from './embeddings';
 import {
   createSemanticService,
@@ -62,6 +71,11 @@ export interface ProgressionStatus {
   readonly feedings: number;
   /** Normalized affinity distribution; sums to 1 (rounded for display). */
   readonly affinities: Readonly<Partial<Record<string, number>>>;
+  /**
+   * Browsing interests, decayed to "now" and rounded. This is the deterministic
+   * environment channel; it exists even when the model has never loaded.
+   */
+  readonly interests: ReadonlyArray<{ readonly interest: string; readonly weight: number }>;
 }
 
 /** What the popup can say about the model and the learned interests. */
@@ -109,8 +123,18 @@ export interface DatabaseService {
   purchaseUpgrade(upgradeId: string): Promise<PurchaseOutcome>;
   /** Learn from a feeding; safe to call after the transaction has committed. */
   learnFromFeeding(payload: FeedingPayload): Promise<CognitionSnapshot>;
-  /** Learn from accumulated time in an environment (whole steps only). */
-  learnFromExposure(environment: string, host: string, steps: number): Promise<CognitionSnapshot>;
+  /**
+   * Learn from focused browsing time. Deterministic: no model, no vectors, just
+   * host/kind/time into the interest weights.
+   */
+  learnFromBrowsing(input: BrowsingExposureInput): Promise<BrowsingExposureResult>;
+  /** What this site would teach, and whether the user has overridden it. */
+  siteInterest(
+    host: string,
+    environment: EnvironmentKind,
+  ): Promise<{ host: string; override: InterestKind | null; interests: readonly { interest: InterestKind; weight: number }[] }>;
+  /** Set (or clear, with null) one host's interest override. */
+  setSiteInterest(host: string, interest: InterestKind | null): Promise<InterestKind | null>;
   /** Rank candidate words for the content script's creature, with the model used. */
   prioritize(requests: readonly PriorityRequest[]): Promise<{
     readonly model: string;
@@ -171,16 +195,25 @@ export function createDatabaseService(options: DatabaseServiceOptions): Database
   return {
     async status() {
       const db = await open();
-      const [vocabularyCount, feedingCount, storage, progression, upgrades, profiles, embeddingCount] =
-        await Promise.all([
-          countVocabulary(db),
-          countFeedingEvents(db),
-          storageEstimate(),
-          getProgression(db, CREATURE_ID),
-          upgradeStatuses(db),
-          summarizeInterestProfiles(db),
-          countEmbeddings(db),
-        ]);
+      const [
+        vocabularyCount,
+        feedingCount,
+        storage,
+        progression,
+        upgrades,
+        profiles,
+        embeddingCount,
+        browsing,
+      ] = await Promise.all([
+        countVocabulary(db),
+        countFeedingEvents(db),
+        storageEstimate(),
+        getProgression(db, CREATURE_ID),
+        upgradeStatuses(db),
+        summarizeInterestProfiles(db),
+        countEmbeddings(db),
+        readInterests(db, Date.now()),
+      ]);
 
       const xp = progression?.xp ?? 0;
       const progress = levelProgress(xp);
@@ -200,6 +233,7 @@ export function createDatabaseService(options: DatabaseServiceOptions): Database
           discoveries: progression?.discoveries ?? 0,
           feedings: progression?.feedings ?? 0,
           affinities: describeAffinities(progression?.affinities ?? {}),
+          interests: browsing.described,
         },
         upgrades,
         semantics: {
@@ -231,10 +265,18 @@ export function createDatabaseService(options: DatabaseServiceOptions): Database
       });
     },
 
-    async learnFromExposure(environment, host, steps) {
+    async learnFromBrowsing(input) {
+      return recordBrowsingExposure(await open(), input);
+    },
+
+    async siteInterest(host, environment) {
+      return describeSite(await open(), host, environment);
+    },
+
+    async setSiteInterest(host, interest) {
       const db = await open();
-      const provider = await semantics.prepare();
-      return evolveFromExposure(db, provider, { environment, host, steps, now: Date.now() });
+      const record = await setSiteOverride(db, host, interest, Date.now());
+      return record?.interest ?? null;
     },
 
     async prioritize(requests) {

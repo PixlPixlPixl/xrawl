@@ -12,6 +12,7 @@
  */
 import type { EnvironmentKind } from '@/shared/types/page';
 import type { FeedingSource } from './observation';
+import type { InterestKind } from '@/progression/interests';
 import { stableKey } from '@/shared/id';
 
 export const XRAWL_DB_NAME = 'xrawl';
@@ -27,6 +28,7 @@ export const XRAWL_TABLE_SCHEMAS = {
   personality: 'id, kind, updatedAt, [kind+updatedAt]',
   embeddings: 'id, model, subjectType, subjectId, sourceHash, updatedAt, [model+subjectType+subjectId]',
   interestProfiles: 'id, category, weight, updatedAt',
+  interestOverrides: 'host, updatedAt',
 } as const satisfies Record<string, string>;
 
 export const XRAWL_TABLE_NAMES = Object.keys(XRAWL_TABLE_SCHEMAS) as XrawlTableName[];
@@ -223,6 +225,13 @@ export interface ProgressionRecord {
    * accumulating in several places at once.
    */
   affinities: Partial<Record<EnvironmentKind, number>>;
+  /**
+   * Interests developed by *browsing* (0..1 per interest, decayed lazily from
+   * `interestsUpdatedAt`). Kept here rather than in the embedding profile pool
+   * because it must work with no model at all.
+   */
+  interests: Partial<Record<InterestKind, number>>;
+  interestsUpdatedAt: number;
   updatedAt: number;
 }
 
@@ -265,6 +274,23 @@ export interface EmbeddingRecord {
   normalized: boolean;
   sourceHash: string;
   createdAt: number;
+  updatedAt: number;
+}
+
+/* ------------------------------------------------------------------------- */
+/* interest overrides                                                         */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * A user's explicit answer to "what is this site about?".
+ *
+ * Hosts are keyed without `www.`, lowercase, so `github.com` and
+ * `www.github.com` are one override. Absence means "use the classifier", which
+ * is why deleting a row is how you hand a site back to automatic.
+ */
+export interface InterestOverrideRecord {
+  host: string;
+  interest: InterestKind;
   updatedAt: number;
 }
 
@@ -312,6 +338,11 @@ export function buildEmbeddingId(
   sourceHash: string,
 ): string {
   return stableKey('embedding', model, dimensions, subjectType, sourceHash);
+}
+
+/** Hosts are compared without `www.`, lowercase, and without a port. */
+export function interestOverrideId(host: string): string {
+  return host.trim().toLowerCase().replace(/^www\./, '').split(':')[0]!;
 }
 
 export function interestProfileId(category: string): string {

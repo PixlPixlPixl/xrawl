@@ -35,6 +35,7 @@ import { OBSERVATION_LIMITS, type FeedingPayload, type ObservationPayload } from
 import { CREATURE_ID } from '@/data/repositories/creature-repository';
 import { lexicalProvider } from '@/semantics/lexical';
 import type { EmbeddingProvider } from '@/semantics/provider';
+import { countCalls, stubProvider, stubVector } from './helpers/embeddings';
 import { nowAt, openDatabase } from './helpers/db';
 import type { XrawlDatabase } from '@/data/db';
 
@@ -47,61 +48,6 @@ async function open(): Promise<XrawlDatabase> {
   const opened = await openDatabase();
   cleanup.push(() => opened.destroy());
   return opened.db;
-}
-
-/**
- * A provider with *known* geometry: one dimension per topic, so a vector built
- * from "compiler database" is orthogonal to one built from "recipe bread".
- */
-const TOPIC_WORDS: Readonly<Record<string, readonly string[]>> = {
-  technology: ['code', 'compiler', 'database', 'programming', 'software', 'algorithm', 'repository', 'api', 'server', 'syntax', 'function'],
-  science: ['science', 'research', 'physics', 'biology', 'chemistry', 'experiment', 'theory', 'evidence'],
-  nature: ['nature', 'animal', 'plant', 'forest', 'ocean', 'weather', 'ecology', 'insect', 'bird'],
-  food: ['food', 'cooking', 'recipe', 'kitchen', 'taste', 'meal', 'ingredient', 'restaurant', 'bread'],
-  literature: ['literature', 'story', 'novel', 'poem', 'author', 'character', 'essay', 'history', 'language'],
-};
-const TOPIC_ORDER = Object.keys(TOPIC_WORDS);
-
-function stubVector(text: string): number[] {
-  const vector: number[] = [];
-  for (let index = 0; index < EMBEDDING_DIMENSIONS; index += 1) vector.push(0);
-
-  const lower = text.toLowerCase();
-  let matched = 0;
-  TOPIC_ORDER.forEach((topic, slot) => {
-    for (const word of TOPIC_WORDS[topic] ?? []) {
-      if (lower.includes(word)) {
-        vector[slot] = (vector[slot] ?? 0) + 1;
-        matched += 1;
-      }
-    }
-  });
-
-  // Anything without a topic gets a dimension of its own: structurally
-  // unrelated, which is exactly what an off-topic page is.
-  if (matched === 0) vector[EMBEDDING_DIMENSIONS - 1] = 1;
-  return normalizeVector(vector);
-}
-
-interface CountingProvider extends EmbeddingProvider {
-  readonly calls: number[];
-}
-
-function stubProvider(model = 'test/stub-384'): CountingProvider {
-  const calls: number[] = [];
-  return {
-    model,
-    dimensions: EMBEDDING_DIMENSIONS,
-    calls,
-    async embed(texts) {
-      calls.push(texts.length);
-      return texts.map((text) => stubVector(text));
-    },
-  };
-}
-
-function countCalls(provider: CountingProvider): number {
-  return provider.calls.reduce((total, value) => total + value, 0);
 }
 
 function feeding(overrides: Partial<FeedingPayload> = {}): FeedingPayload {
@@ -243,6 +189,7 @@ describe('hunting priorities', () => {
       profiles,
       timesEaten: 0,
       rarity: 0.5,
+      interest: 0,
     });
     const unrelated = planHunt({
       word: 'bread',
@@ -250,6 +197,7 @@ describe('hunting priorities', () => {
       profiles,
       timesEaten: 0,
       rarity: 0.5,
+      interest: 0,
     });
 
     expect(related.relevance).toBeGreaterThan(unrelated.relevance);
@@ -263,6 +211,7 @@ describe('hunting priorities', () => {
       profiles: [],
       timesEaten: 0,
       rarity: 0.5,
+      interest: 0,
     });
     const eaten = planHunt({
       word: 'compiler',
@@ -270,6 +219,7 @@ describe('hunting priorities', () => {
       profiles: [],
       timesEaten: 5,
       rarity: 0.5,
+      interest: 0,
     });
     expect(fresh.novelty).toBeGreaterThan(eaten.novelty);
     expect(fresh.priority).toBeGreaterThan(eaten.priority);
@@ -291,6 +241,7 @@ describe('hunting priorities', () => {
       profiles: seedProfiles([{ category: 'technology', vector: stubVector('compiler') }], 0),
       timesEaten: 0,
       rarity: 0.5,
+      interest: 0,
     });
     const unrelated = planHunt({
       word: 'compiler',
@@ -298,6 +249,7 @@ describe('hunting priorities', () => {
       profiles: seedProfiles([{ category: 'technology', vector: stubVector('compiler') }], 0),
       timesEaten: 0,
       rarity: 0.5,
+      interest: 0,
     });
 
     if (isExplorationWord(word)) {

@@ -1,3 +1,4 @@
+import { INTEREST_KINDS } from '@/progression/interests';
 import type { EnvironmentKind, EnvironmentClassification, PageInfo } from './page';
 import type { ScanStats, WorldSnapshot } from './word-target';
 
@@ -114,6 +115,8 @@ export interface DatabaseStatusPayload {
     readonly feedings: number;
     /** Environment affinity distribution, summing to 1 (rounded for display). */
     readonly affinities: Readonly<Partial<Record<string, number>>>;
+    /** Browsing interests, decayed to now; the non-AI environment channel. */
+    readonly interests: ReadonlyArray<{ readonly interest: string; readonly weight: number }>;
   };
   /** Model state and learned attention shares (empty until something is eaten). */
   readonly semantics: {
@@ -132,6 +135,34 @@ export interface DatabaseStatusPayload {
     readonly nextCost: number;
     readonly affordable: boolean;
   }>;
+}
+
+/** popup → background: what this site currently teaches, and its options. */
+export interface SiteInterestRequest {
+  readonly type: 'xrawl/site-interest';
+  readonly host: string;
+  readonly environment: EnvironmentKind;
+}
+
+export interface SiteInterestPayload {
+  readonly host: string;
+  /** The user's override, or null when the site is classified automatically. */
+  readonly override: string | null;
+  readonly interests: ReadonlyArray<{ readonly interest: string; readonly weight: number }>;
+  /** Every category, so the popup does not hardcode the list. */
+  readonly kinds: ReadonlyArray<{ readonly id: string; readonly label: string }>;
+}
+
+/** popup → background: set or clear (null) one host's interest override. */
+export interface SetSiteInterestRequest {
+  readonly type: 'xrawl/set-site-interest';
+  readonly host: string;
+  readonly interest: string | null;
+}
+
+export interface SetSiteInterestPayload {
+  readonly host: string;
+  readonly override: string | null;
 }
 
 /** content → background: rank candidate words for hunting. */
@@ -186,6 +217,8 @@ export type PersistenceRequest =
   | ObserveMessage
   | FeedMessage
   | PrioritizeRequest
+  | SiteInterestRequest
+  | SetSiteInterestRequest
   | DatabaseStatusRequest
   | DatabaseExportRequest
   | DatabaseImportRequest
@@ -308,6 +341,28 @@ export function isFeedMessage(message: unknown): message is FeedMessage {
       payload.source === 'autonomous') &&
     typeof payload.nutrition === 'number' &&
     typeof payload.preferenceDelta === 'number'
+  );
+}
+
+export function isSiteInterestRequest(message: unknown): message is SiteInterestRequest {
+  return (
+    isObject(message) &&
+    message.type === 'xrawl/site-interest' &&
+    typeof message.host === 'string' &&
+    message.host.length > 0 &&
+    message.host.length <= 255 &&
+    isEnvironmentKind(message.environment)
+  );
+}
+
+export function isSetSiteInterestRequest(message: unknown): message is SetSiteInterestRequest {
+  if (!isObject(message) || message.type !== 'xrawl/set-site-interest') return false;
+  if (typeof message.host !== 'string' || message.host.length === 0) return false;
+  if (message.host.length > 255) return false;
+  if (message.interest === null) return true;
+  return (
+    typeof message.interest === 'string' &&
+    (INTEREST_KINDS as readonly string[]).includes(message.interest)
   );
 }
 

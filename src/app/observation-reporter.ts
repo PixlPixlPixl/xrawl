@@ -75,6 +75,25 @@ export class ObservationReporter {
     if (this.activeMsSinceFlush >= this.heartbeatMs) this.flush(snapshot, false);
   }
 
+  /**
+   * Stop the clock: the window lost focus or the document was hidden.
+   *
+   * Time spent in a background tab is not browse time, so the reporter must not
+   * accrue it - otherwise a tab left open overnight would silently rewire the
+   * creature's interests. Accrues up to this instant first, so a focused minute
+   * is not lost just because it ended with a blur.
+   */
+  pause(): void {
+    if (this.stopped) return;
+    this.accrueActiveTime();
+  }
+
+  /** Restart the clock after a focus or visibility change. */
+  resume(): void {
+    if (this.stopped) return;
+    this.lastTickAt = this.now();
+  }
+
   /** Final flush when the session closes or the page unloads. */
   stop(): void {
     if (this.stopped) return;

@@ -9,6 +9,7 @@ import type { EnvironmentKind } from '@/shared/types/page';
 import type { XrawlDatabase } from '../db';
 import type { ProgressionRecord } from '../schema';
 import { levelForXp } from '@/progression/level';
+import type { InterestKind } from '@/progression/interests';
 
 export function emptyProgression(id: string, now: number): ProgressionRecord {
   return {
@@ -22,6 +23,8 @@ export function emptyProgression(id: string, now: number): ProgressionRecord {
     discoveries: 0,
     environments: {},
     affinities: {},
+    interests: {},
+    interestsUpdatedAt: 0,
     updatedAt: now,
   };
 }
@@ -57,6 +60,12 @@ export interface ProgressionAward {
   readonly environment: EnvironmentKind;
   /** Distribution after this feeding; omitted only by non-feeding writers. */
   readonly affinities?: Partial<Record<EnvironmentKind, number>>;
+  /**
+   * Browsing interests when this writer owns them (exposure learning). A feeding
+   * leaves them untouched: exposure and feeding are separate channels.
+   */
+  readonly interests?: Partial<Record<InterestKind, number>>;
+  readonly interestsUpdatedAt?: number;
 }
 
 /**
@@ -87,6 +96,8 @@ export async function applyProgressionAward(
         [award.environment]: (existing.environments[award.environment] ?? 0) + 1,
       },
       affinities: award.affinities ?? existing.affinities ?? {},
+      interests: award.interests ?? existing.interests ?? {},
+      interestsUpdatedAt: award.interestsUpdatedAt ?? existing.interestsUpdatedAt ?? 0,
       updatedAt: now,
     };
 

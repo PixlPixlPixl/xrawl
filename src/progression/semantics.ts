@@ -30,15 +30,18 @@ export const FALLBACK_EMBEDDING_MODEL = 'xrawl/lexical-384';
 export type SemanticVector = readonly number[];
 
 /**
- * How strongly each kind of experience moves a profile.
+ * How strongly each kind of *feeding* moves a profile.
  *
- * The user deliberately choosing a word matters most; merely spending time in
- * an environment is moderate evidence; the creature's own foraging is weakest,
- * or it would reinforce its own choices and get stuck eating one subject.
+ * The user deliberately choosing a word matters most; the creature's own
+ * foraging is weakest, or it would reinforce its own choices and get stuck
+ * eating one subject.
+ *
+ * Browsing time is not here on purpose: environment exposure develops broad
+ * interests through the classifier and keyword lists (`interests.ts`), which
+ * needs no model and therefore cannot be a profile influence.
  */
 export const SEMANTIC_INFLUENCE = {
   manual: 0.5,
-  environment: 0.15,
   autonomous: 0.08,
 } as const;
 

@@ -1,11 +1,15 @@
 /**
  * Cognition: how experience becomes preference.
  *
- * Three inputs move the creature, deliberately weighted apart:
+ * Feeding is what this module learns from, weighted by who chose the word:
  *
  *  - **manual** (0.5) - the user picked the word on purpose;
- *  - **environment** (0.15) - time spent somewhere is weaker evidence;
  *  - **autonomous** (0.08) - its own foraging, weakest of all.
+ *
+ * Browsing time is deliberately *not* handled here. Exposure develops broad
+ * interests from the environment classifier and keyword lists (`data/interests`),
+ * with no model at all, so a phone that never loads MiniLM still learns from
+ * where the user browses. The two channels meet only in `prioritizeWords`.
  *
  * If autonomous feeding moved interests as strongly as manual feeding, the
  * creature would reinforce its own choices and get stuck on one subject. The
@@ -33,7 +37,9 @@ import {
 import { planHunt, type HuntPlan } from '@/progression/hunting';
 import { wordRarity } from '@/progression/frequency';
 import type { EmbeddingProvider } from '@/semantics/provider';
-import { environmentAnchorText, feedingText } from '@/semantics/provider';
+import { feedingText } from '@/semantics/provider';
+import { readInterests } from './interests';
+import { wordInterest as interestOfWord } from '@/progression/interests';
 
 /** Rounded pool summary for UI and logs. */
 export interface ProfileSummary {
@@ -176,74 +182,6 @@ export async function evolveFromFeeding(
   };
 }
 
-export interface ExposureCognitionInput {
-  readonly environment: string;
-  readonly host: string;
-  /** Number of whole exposure steps accumulated (already throttled upstream). */
-  readonly steps: number;
-  readonly now: number;
-}
-
-/**
- * Learn from time spent in an environment.
- *
- * Weaker than a feeding on purpose, and it only fires on whole steps, so idling
- * on a page for eight hours is not eight hours of evidence. The anchor text
- * stands in for a page summary: at this point there is no text to embed.
- */
-export async function evolveFromExposure(
-  db: XrawlDatabase,
-  provider: EmbeddingProvider,
-  input: ExposureCognitionInput,
-): Promise<CognitionSnapshot> {
-  const prepared = await ensureProfiles(db, provider, input.now);
-  const steps = Math.min(3, Math.max(0, Math.trunc(input.steps)));
-  if (steps === 0) {
-    return {
-      model: provider.model,
-      assigned: SEMANTIC_CONFIG.generalProfile,
-      similarity: 0,
-      profiles: summary(prepared.profiles),
-      seeded: prepared.seeded,
-    };
-  }
-
-  const [vector] = await embedWithCache(
-    db,
-    provider,
-    [
-      {
-        subjectType: 'environment',
-        text: environmentAnchorText(input.environment, input.host),
-        subjectId: input.environment,
-      },
-    ],
-    { now: input.now },
-  );
-
-  let profiles = prepared.profiles;
-  let assigned: string = SEMANTIC_CONFIG.generalProfile;
-  let similarity = 0;
-
-  for (let step = 0; step < steps; step += 1) {
-    if (!vector || vector.length === 0) break;
-    const update = updateProfiles(profiles, vector, SEMANTIC_INFLUENCE.environment, input.now);
-    profiles = update.profiles;
-    assigned = update.assigned;
-    similarity = update.similarity;
-  }
-
-  await saveInterestProfiles(db, provider.model, provider.dimensions, profiles, input.now);
-
-  return {
-    model: provider.model,
-    assigned,
-    similarity,
-    profiles: summary(profiles),
-    seeded: prepared.seeded,
-  };
-}
-
 export interface PriorityRequest {
   readonly word: string;
   /** Sentence the word appeared in, when the caller has one. */
@@ -280,6 +218,8 @@ export async function prioritizeWords(
 
   const prepared = await ensureProfiles(db, provider, options.now);
   const profiles = prepared.profiles;
+  // Browsing interests, decayed to now: the deterministic half of the priority.
+  const interests = (await readInterests(db, options.now)).weights;
 
   const words = requests.map((request) => request.word);
   const vocabulary = await db.vocabulary.bulkGet(words);
@@ -343,6 +283,7 @@ export async function prioritizeWords(
       timesEaten: timesEaten.get(request.word) ?? 0,
       // Unknown words are neutral, exactly as the reward formula treats them.
       rarity: wordRarity(request.word).rarity,
+      interest: interestOfWord(request.word, interests),
     });
     return { word: request.word, ...plan, relevance: relevanceByIndex[index] ?? plan.relevance };
   });

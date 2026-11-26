@@ -140,6 +140,22 @@ const V5_STORES: Record<string, string> = {
   interestProfiles: 'id, category, weight, updatedAt',
 };
 
+/**
+ * V6 - browsing interests and per-site overrides.
+ *
+ * `progression` gains `interests` and `interestsUpdatedAt`: interests built from
+ * focused browsing time, decayed lazily from the timestamp. The new
+ * `interestOverrides` table lets the user state what a site is about instead of
+ * relying on a host regex.
+ *
+ * The upgrader only backfills the two new columns; nothing is invented, so an
+ * existing creature starts with no browsing interests rather than a guess.
+ */
+const V6_STORES: Record<string, string> = {
+  ...V5_STORES,
+  interestOverrides: 'host, updatedAt',
+};
+
 export const MIGRATIONS: readonly Migration[] = [
   {
     version: 1,
@@ -232,6 +248,21 @@ export const MIGRATIONS: readonly Migration[] = [
     version: 5,
     description: 'Learned interest profiles (vector + attention share) in their own table',
     stores: V5_STORES,
+  },
+  {
+    version: 6,
+    description: 'Browsing interests (decayed) and per-site interest overrides',
+    stores: V6_STORES,
+    async upgrade({ table }) {
+      const progression = table('progression') as import('dexie').Table<
+        Record<string, unknown>,
+        string
+      >;
+      await progression.toCollection().modify((row) => {
+        row.interests ??= {};
+        row.interestsUpdatedAt ??= 0;
+      });
+    },
   },
 ];
 

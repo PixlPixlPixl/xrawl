@@ -22,16 +22,22 @@ import {
   isFeedMessage,
   isObserveMessage,
   isPrioritizeRequest,
+  isSetSiteInterestRequest,
+  isSiteInterestRequest,
   isStatsPushMessage,
   isUpgradePurchaseRequest,
 } from '@/shared/types/messaging';
 import type {
   PrioritizePayload,
+  SetSiteInterestPayload,
+  SiteInterestPayload,
   StatusPayload,
   UpgradePurchasePayload,
   XrawlResponse,
 } from '@/shared/types/messaging';
+import { INTEREST_KINDS, INTEREST_LABELS, type InterestKind } from '@/progression/interests';
 import type { PurchaseOutcome } from '@/data/progression';
+import { OBSERVATION_LIMITS } from '@/data/observation';
 
 const statsByTab = new Map<number, StatusPayload>();
 
@@ -105,18 +111,19 @@ export default defineBackground(() => {
         .ingestObservation(message.payload)
         .then((result) => {
           sendResponse(ok(result));
-          // Environment learning is derived from accumulated session time, so it
-          // runs after the write rather than inside it. It may fail quietly:
-          // preferences are not worth losing an observation over.
+          // Browsing interests are derived from whole exposure steps of focused
+          // session time, so they run after the write rather than inside it. They
+          // may fail quietly: interests are not worth losing an observation over.
           if (result.exposureSteps > 0) {
             void database
-              .learnFromExposure(
-                message.payload.environment,
-                message.payload.host,
-                result.exposureSteps,
-              )
+              .learnFromBrowsing({
+                host: message.payload.host,
+                environment: message.payload.environment,
+                activeMs: result.exposureSteps * OBSERVATION_LIMITS.exposureStepMs,
+                now: message.payload.capturedAt,
+              })
               .catch((error: unknown) => {
-                console.warn('[xrawl] exposure learning skipped', String(error));
+                console.warn('[xrawl] browsing exposure skipped', String(error));
               });
           }
         })
@@ -170,6 +177,39 @@ export default defineBackground(() => {
         .prioritize(message.words)
         .then((result) => {
           const payload: PrioritizePayload = { model: result.model, priorities: result.priorities };
+          sendResponse(ok(payload));
+        })
+        .catch((error: unknown) => sendResponse(fail(error)));
+      return true;
+    }
+
+    if (isSiteInterestRequest(message)) {
+      void database
+        .siteInterest(message.host, message.environment)
+        .then((site) => {
+          const payload: SiteInterestPayload = {
+            host: site.host,
+            override: site.override,
+            interests: site.interests.map((entry) => ({
+              interest: entry.interest,
+              weight: entry.weight,
+            })),
+            kinds: INTEREST_KINDS.map((kind) => ({ id: kind, label: INTEREST_LABELS[kind] })),
+          };
+          sendResponse(ok(payload));
+        })
+        .catch((error: unknown) => sendResponse(fail(error)));
+      return true;
+    }
+
+    if (isSetSiteInterestRequest(message)) {
+      // The guard already restricted this to a known category or null; the cast
+      // only tells TypeScript what the validator proved.
+      const interest = message.interest as InterestKind | null;
+      void database
+        .setSiteInterest(message.host, interest)
+        .then((value) => {
+          const payload: SetSiteInterestPayload = { host: message.host, override: value };
           sendResponse(ok(payload));
         })
         .catch((error: unknown) => sendResponse(fail(error)));
