@@ -276,8 +276,6 @@ export class CreatureEngine {
       }
     }
 
-    const transform = this.transform();
-
     if (this.currentTarget && !isStationaryAction(this.action)) {
       const destination = lead(this.currentTarget.point, this.movement.position, this.rig.body.width);
       const result = this.movement.step(dt, destination, {
@@ -295,13 +293,17 @@ export class CreatureEngine {
       this.movement.lastTravel = 0;
     }
 
+    // The gait must see where the body is *now*, not where it was before it
+    // moved: a frame-old transform puts every landing target behind the body,
+    // which is exactly the pose that reads as legs trailing.
+    const movedTransform = this.transform();
     const moving = this.movement.lastTravel > 1e-3;
     if (moving) {
-      this.gait.update(dt, transform, this.movement.lastTravel / Math.max(dt, 1e-4));
+      this.gait.update(dt, movedTransform, this.movement.lastTravel / Math.max(dt, 1e-4));
     } else if (this.action !== 'eating') {
       // Keep planting: a target that disappears mid-stride should not leave a
       // foot frozen in the air.
-      this.gait.update(dt, transform, 0);
+      this.gait.update(dt, movedTransform, 0);
     }
 
     const pose = buildPose({

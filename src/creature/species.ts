@@ -121,7 +121,9 @@ export interface SpeciesDefinition {
   readonly defaults: CreatureGenetics;
   /** Scales stride length and step timing relative to limb reach. */
   readonly gait: {
+    /** Stride as a fraction of limb reach; shorten it to keep the feet apart. */
     readonly strideFactor: number;
+    /** Seconds a foot may spend in the air at a slow walk. */
     readonly stepDurationMs: number;
     /** Vertical arc of a moving foot, in CSS px. */
     readonly liftHeight: number;
@@ -177,13 +179,15 @@ export const SPECIES: readonly SpeciesDefinition[] = [
     id: 'spider',
     name: 'Spider',
     defaults: SPIDER_DEFAULTS,
-    gait: { strideFactor: 0.5, stepDurationMs: 180, liftHeight: 5 },
+    // A stride has to stay shorter than the gap between neighbouring feet, or
+    // each step drags a foot past its neighbour and the legs scissor.
+    gait: { strideFactor: 0.3, stepDurationMs: 180, liftHeight: 5 },
   },
   {
     id: 'mite',
     name: 'Mite',
     defaults: MITE_DEFAULTS,
-    gait: { strideFactor: 0.55, stepDurationMs: 130, liftHeight: 3 },
+    gait: { strideFactor: 0.4, stepDurationMs: 130, liftHeight: 3 },
   },
 ];
 

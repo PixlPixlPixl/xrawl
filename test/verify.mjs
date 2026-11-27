@@ -683,7 +683,7 @@ async function main() {
     assert.match(after, /rotate\(/);
   });
 
-  await check('feet lift independently and alternate between groups', async () => {
+  await check('feet lift independently and step in a staggered wave', async () => {
     const samples = [];
     for (let index = 0; index < 40; index += 1) {
       const state = await page.evaluate(() => {
@@ -692,6 +692,8 @@ async function main() {
           limb: Number(foot.getAttribute('data-limb')),
           lift: Number(foot.getAttribute('data-lift-px') ?? 0),
           airborne: foot.getAttribute('data-lift') === 'airborne',
+          x: Number(foot.getAttribute('cx') ?? 0),
+          y: Number(foot.getAttribute('cy') ?? 0),
         }));
       });
       samples.push(state);
@@ -713,7 +715,7 @@ async function main() {
     );
     assert.ok(neverAllAirborne, 'all feet lifted at once');
 
-    // 3. Different limb sets step at different times: alternation, not one
+    // 3. Different limb sets step at different times: a wave of legs, not one
     //    rigid block of feet moving together.
     const airborneSets = new Set(
       samples.map((sample) => sample.filter((foot) => foot.airborne).map((foot) => foot.limb).join(',')),
@@ -726,6 +728,22 @@ async function main() {
         assert.ok(Number.isFinite(foot.lift) && foot.lift >= 0 && foot.lift <= 40);
       }
     }
+
+    // 5. Feet keep their own lanes: two ground markers must not land on top of
+    //    each other, however the body is walking or turning.
+    const closest = samples.reduce((min, sample) => {
+      let pairMin = Infinity;
+      for (let a = 0; a < sample.length; a += 1) {
+        for (let b = a + 1; b < sample.length; b += 1) {
+          pairMin = Math.min(
+            pairMin,
+            Math.hypot(sample[a].x - sample[b].x, sample[a].y - sample[b].y),
+          );
+        }
+      }
+      return Math.min(min, pairMin);
+    }, Infinity);
+    assert.ok(closest > 6, `feet overlapped: closest pair ${closest.toFixed(1)}px`);
   });
 
   await check('eating is a distinct state from walking', async () => {

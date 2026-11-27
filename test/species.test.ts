@@ -110,7 +110,7 @@ describe('upgrades vs genetics', () => {
 });
 
 describe('rig construction', () => {
-  it('pairs limbs across both sides and alternates stepping groups', () => {
+  it('pairs limbs across both sides, front to back', () => {
     const rig = buildRig(appearanceFromGenetics(spider.defaults), { strideFactor: 0.5 });
     expect(rig.limbs.length).toBe(8);
 
@@ -122,13 +122,35 @@ describe('rig construction', () => {
     expect(sides.left).toBe(4);
     expect(sides.right).toBe(4);
 
-    const groups = new Set(rig.limbs.map((limb) => limb.group));
-    expect(groups.size).toBe(2);
-    // Each group has both sides represented, so the body is never unsupported.
-    for (const group of [0, 1] as const) {
-      const groupLimbs = rig.limbs.filter((limb) => limb.group === group);
-      expect(groupLimbs.some((limb) => limb.side === 1)).toBe(true);
-      expect(groupLimbs.some((limb) => limb.side === -1)).toBe(true);
+    // Every band is a pair: one leg each side, in the same order.
+    for (const band of [0, 1, 2, 3]) {
+      const pair = rig.limbs.filter((limb) => limb.band === band);
+      expect(pair.length).toBe(2);
+      expect(pair.some((limb) => limb.side === 1)).toBe(true);
+      expect(pair.some((limb) => limb.side === -1)).toBe(true);
+    }
+  });
+
+  it('fans the feet out instead of folding them under the body', () => {
+    const rig = buildRig(appearanceFromGenetics(spider.defaults), { strideFactor: 0.5 });
+    const forwards = rig.limbs
+      .filter((limb) => limb.side === 1)
+      .sort((a, b) => a.band - b.band);
+
+    // Feet along one side must march backwards: a front foot ahead of the one
+    // behind it is a leg crossing, and that is where feet start landing on top
+    // of each other.
+    for (let index = 1; index < forwards.length; index += 1) {
+      expect(forwards[index]!.restTarget.x).toBeLessThan(forwards[index - 1]!.restTarget.x);
+    }
+
+    // Neighbouring feet need a clear gap; anything tighter reads as one leg.
+    for (let a = 0; a < rig.limbs.length; a += 1) {
+      for (let b = a + 1; b < rig.limbs.length; b += 1) {
+        const first = rig.limbs[a]!.restTarget;
+        const second = rig.limbs[b]!.restTarget;
+        expect(Math.hypot(first.x - second.x, first.y - second.y)).toBeGreaterThan(8);
+      }
     }
   });
 

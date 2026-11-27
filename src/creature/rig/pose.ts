@@ -14,7 +14,6 @@ import { toWorld, type CreatureRig } from './rig';
 export interface LimbPose {
   readonly index: number;
   readonly side: -1 | 1;
-  readonly group: 0 | 1;
   /** Joint chain from body attachment to foot. */
   readonly joints: readonly Point[];
   /** Foot height above the ground, for the shadow offset. */
@@ -72,7 +71,10 @@ export function buildPose(input: PoseInput): CreaturePose {
   const limbs: LimbPose[] = rig.limbs.map((limb, index) => {
     const foot = input.feet[index] ?? toWorld(limb.restTarget, origin, heading);
     const state = input.feetState[index] ?? { lift: 0, stepping: false };
-    const base = toWorld(limb.base, origin, heading);
+    // The bob is a body offset, so the limb roots ride it too: drawing the body
+    // above fixed leg attachments makes the torso slide over its own hips.
+    const world = toWorld(limb.base, origin, heading);
+    const base = { x: world.x, y: world.y - bob };
 
     // Limbs bend away from the body mid-line so mirrored legs mirror too.
     const seed = seedChain(base, foot, limb.boneLengths, { bendSign: limb.side });
@@ -84,7 +86,6 @@ export function buildPose(input: PoseInput): CreaturePose {
     return {
       index,
       side: limb.side,
-      group: limb.group,
       joints,
       lift: state.lift,
       stepping: state.stepping,

@@ -324,9 +324,11 @@ and re-imports the world, and checks that invalid and newer-schema envelopes are
 rejected without touching live data.
 
 The creature section inspects the live SVG: eight articulated limb paths whose
-bone lengths match the rig, a body that moves and re-orients over time, an
-alternating gait where some feet are airborne and others planted (never all
-airborne at once), and a jaw that only animates in the eating state.
+bone lengths match the rig, a body that moves and re-orients over time, a gait
+where some feet are airborne and others planted (never all airborne at once), the
+stepping wave changing pattern between frames, ground markers that stay apart
+instead of landing on top of one another, and a jaw that only animates in the
+eating state.
 
 The fixture covers normal paragraphs, hard-wrapped long words, hidden content
 (CSS and `hidden`), `visibility` overrides, overflow-clipped strips, editable/
@@ -975,18 +977,39 @@ Species are just default gene sets: `spider` (8 legs, 3 bones each) and `mite`
 | Component | File | Responsibility |
 | --- | --- | --- |
 | Movement controller | `movement/movement-controller.ts` | where the body is; rate-limited turning; speed throttled by facing so it cannot orbit a target |
-| Gait controller | `movement/gait-controller.ts` | when each foot lifts, where it lands, when it plants; alternating groups; planted feet drag with the body |
+| Gait controller | `movement/gait-controller.ts` | when each foot lifts, where it lands, when it plants; per-leg phase offsets; planted feet drag with the body |
 | FABRIK solver | `rig/fabrik.ts` | how articulated limbs bend, preserving bone lengths |
 
 `rig/pose.ts` is where they meet: it seeds each chain, solves it, and emits a
 `CreaturePose` of plain points. The renderer (`render/svg-renderer.ts`) draws
 that pose and decides nothing.
 
+How the gait is scheduled:
+
+- **Every foot has its own phase in one shared cycle.** One side ripples from rear
+  to front, and the other side runs the same ripple half a cycle later — so the
+  legs take turns, the wave visibly travels frontwards, and the two sides of a
+  band never lift at the same time.
+- **Cycle length is one stride of travel at the foot.** The body drags a planted
+  foot for its whole stance, so a foot never wanders more than a stride from the
+  stance the rig gave it. The cycle uses the time each leg needs, which counts
+  for turning: a pivot sweeps the outer legs much faster than the body travels,
+  so a turning creature steps more often instead of shearing its legs.
+- **Landings are projected to when the foot lands.** The target is that leg's
+  rest target on the body as it will be at touch-down. A foot therefore lifts
+  behind its stance and lands ahead of it, so its swing stays centred on its own
+  lane; aiming at the current body instead leaves every foot dragging behind it.
+- **The body bob moves the leg roots too.** The bob is a drawing offset, but
+  drawing the torso above fixed hips slides the body over its own shoulders.
+
 Two solver details worth knowing:
 
-- **The seed is curved, not straight.** A perfectly straight chain is an unstable
-  fixed point — forward and backward passes cancel and the limb stalls. Seeding
-  with a gentle bend gives FABRIK a moment arm.
+- **The seed is a spiral, not a straight line.** A perfectly straight chain is an
+  unstable fixed point — forward and backward passes cancel and the limb stalls.
+  The seed turns each bone by a matching angle, chosen so the chain spans the
+  root-to-target chord. Two-bone legs are the worst case: with a nearly straight
+  seed their single knee has almost no moment arm and needs dozens of iterations
+  to fold, which shows up as a straight, stretched leg on screen.
 - **The foot is never force-assigned after solving**, because that would change
   the last bone's length. Convergence is the guarantee; residue is bounded by
   the tolerance.
@@ -1086,10 +1109,12 @@ over `xrawl/creature-loadout`.
 - **Personality affinity is outside the environment pool.** It is signed
   evidence from learned rows (-1..1), so it can also *reduce* a reward; it has
   its own cap and does not compete with the environment distribution.
-- **Gait is a tetrapod approximation.** Feet alternate by band parity rather
-  than true per-leg phase offsets, and planted feet drag until the step
-  threshold. It reads correctly for 6-8 limbs; more exotic gaits would need
-  per-limb phase tables.
+- **Gait will not carry a sped-up spider.** Steps are timed from stride and speed,
+  so the gait stays planted at anything the base attributes produce. Upgrades
+  stack multiplicatively, and a heavy `locomotion.speed` stack can drag the body
+  faster than one stride-per-cycle sustains: dragged feet then close in on their
+  neighbours and the picture loses the leg spread. The bound is a stride per
+  cycle; per-leg stride tables or a cap on stacked speed would raise it.
 
 ## Next steps
 

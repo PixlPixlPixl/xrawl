@@ -6,15 +6,25 @@
  * bends a limb — it only chooses foot targets. FABRIK runs later.
  *
  * Protocol:
- *  - Feet plant in world space, so a moving body drags a planted foot behind it
- *    until the drag crosses the step threshold. That drag is what makes the body
- *    look pulled by the legs rather than sliding.
- *  - Stepping alternates between the rig's two groups (band parity). A group may
- *    only start once the other group has had its turn, so a sudden speed change
- *    cannot lift every foot at once.
- *  - The body bob is a drawing offset, not part of the locomotion origin, so
- *    feet never chase the bounce.
+ *  - Every foot runs one gait cycle at its own phase. Phase 0 is the instant a
+ *    foot lifts: `0..duty` is airborne, `duty..1` is planted. Offsets are spread
+ *    evenly over the legs, one side rippling rear-to-front and the other side
+ *    half a cycle later, so the legs take turns, the wave travels frontwards, and
+ *    the two sides of a band never lift together.
+ *  - The cycle lasts exactly as long as the body needs to carry one foot one
+ *    stride, and turning counts: a pivot sweeps the outer feet much faster than
+ *    the body travels. That is what keeps every foot near its own stance; a
+ *    longer cycle lets feet fall behind and pile up.
+ *  - Feet plant in world space, so the body drags a planted foot for its whole
+ *    stance. That drag is what makes the body look pulled by the legs rather than
+ *    sliding.
+ *  - A landing point is that leg's rest target on the body as it will be when the
+ *    foot lands. A foot that lifts half a drag behind its stance and lands half a
+ *    drag ahead swings symmetrically around it, which keeps each leg in its own
+ *    lane; aiming at the current body leaves every foot a drag short, and aiming a
+ *    whole stance ahead aims all of them at one patch of ground.
  */
+import { CREATURE_CONFIG } from '@/shared/constants/creature';
 import type { Point } from '../rig/fabrik';
 import { toWorld, type CreatureRig, type LimbRig } from '../rig/rig';
 
@@ -28,8 +38,8 @@ export interface Foot {
   landingAt: Point | null;
   /** True while the foot is lifted and moving. */
   stepping: boolean;
-  /** 0..1 progress through the current step. */
-  stepPhase: number;
+  /** 0..1 position in the foot's own cycle; 0 is the instant after liftoff. */
+  phase: number;
   /** Height of the foot above the ground in CSS px, 0 when planted. */
   lift: number;
 }
@@ -50,23 +60,35 @@ function easeInOut(t: number): number {
   return t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2;
 }
 
+/** Shortest signed angular difference between two headings, radians. */
+function angleDelta(from: number, to: number): number {
+  let delta = (to - from) % (Math.PI * 2);
+  if (delta > Math.PI) delta -= Math.PI * 2;
+  if (delta < -Math.PI) delta += Math.PI * 2;
+  return delta;
+}
+
 export class GaitController {
   readonly feet: Foot[];
   readonly rig: CreatureRig;
   private readonly options: GaitOptions;
-
-  /** Which group may start the next step. */
-  private nextGroup: 0 | 1 = 0;
-  /** Seconds until the alternating group is allowed to lift. */
-  private groupCooldown = 0;
-  private lastOrigin: Point;
+  /** Liftoff phase of each foot, indexed by limb index. */
+  private readonly offsets: readonly number[];
+  /** Furthest a rest foot sits from the body centre; the radius a pivot sweeps. */
+  private readonly leverArm: number;
+  private lastHeading: number;
 
   constructor(rig: CreatureRig, options: GaitOptions, transform: BodyTransform) {
     this.rig = rig;
     this.options = options;
-    this.lastOrigin = { ...transform.origin };
+    this.lastHeading = transform.heading;
+    this.offsets = waveOffsets(rig.limbs);
+    this.leverArm = rig.limbs.reduce(
+      (max, limb) => Math.max(max, Math.hypot(limb.restTarget.x, limb.restTarget.y)),
+      0,
+    );
 
-    this.feet = rig.limbs.map((limb) => {
+    this.feet = rig.limbs.map((limb, index) => {
       const planted = toWorld(limb.restTarget, transform.origin, transform.heading);
       return {
         limb,
@@ -74,98 +96,61 @@ export class GaitController {
         plantedAt: { ...planted },
         landingAt: null,
         stepping: false,
-        stepPhase: 1,
+        phase: this.restPhase(index),
         lift: 0,
       };
     });
   }
 
   /**
-   * Advance the gait. `speed` is the body's speed in CSS px/s, used only to
-   * predict where a foot should land.
+   * Advance the gait. `speed` is the body's speed in CSS px/s; the turn rate comes
+   * from the heading change, so a pivot steps its feet even with the body still.
    */
   update(dtSeconds: number, transform: BodyTransform, speed: number): void {
-    const velocity: Point = {
-      x: (transform.origin.x - this.lastOrigin.x) / Math.max(1e-4, dtSeconds),
-      y: (transform.origin.y - this.lastOrigin.y) / Math.max(1e-4, dtSeconds),
-    };
-    this.lastOrigin = { ...transform.origin };
+    const dt = Math.max(1e-4, dtSeconds);
+    const turnRate = angleDelta(this.lastHeading, transform.heading) / dt;
+    this.lastHeading = transform.heading;
 
-    this.groupCooldown = Math.max(0, this.groupCooldown - dtSeconds);
-
-    for (const foot of this.feet) {
-      this.advanceStep(foot, dtSeconds);
-    }
-
-    if (this.groupCooldown > 0) return;
-
-    const desired = this.desiredTargets(transform, velocity, speed);
-    const group = this.nextGroup;
-    const stepThreshold = this.rig.stride * 0.55;
-    const duration = Math.max(0.005, this.options.stepDurationMs / 1000);
-
-    let started = false;
-    for (const foot of this.feet) {
-      if (foot.limb.group !== group || foot.stepping) continue;
-      const target = desired.get(foot)!;
-      if (Math.hypot(foot.position.x - target.x, foot.position.y - target.y) < stepThreshold) {
-        continue;
+    const surface = speed + Math.abs(turnRate) * this.leverArm;
+    if (surface <= CREATURE_CONFIG.gaitMinSpeed) {
+      // Standing: land anything still in the air rather than freeze it there.
+      for (const foot of this.feet) {
+        if (foot.stepping) this.plant(foot);
       }
-
-      foot.plantedAt = { ...foot.position };
-      foot.landingAt = target;
-      foot.stepping = true;
-      foot.stepPhase = 0;
-      started = true;
+      return;
     }
 
-    if (started) {
-      this.nextGroup = group === 0 ? 1 : 0;
-      // The alternating group may not lift until this group's feet have landed.
-      // A shorter cooldown lets both groups overlap, and then every foot is in
-      // the air at once — which is not a gait, it is a fall.
-      this.groupCooldown = duration;
-    }
-  }
+    const cycle = this.cycleFor(this.rig.stride / surface);
+    const duty = this.dutyFor(cycle, dt);
+    const targets = this.landingTargets(transform, speed, turnRate, cycle, duty);
 
-  private advanceStep(foot: Foot, dtSeconds: number): void {
-    if (!foot.stepping || foot.landingAt === null) return;
-
-    const duration = Math.max(0.005, this.options.stepDurationMs / 1000);
-    foot.stepPhase = Math.min(1, foot.stepPhase + dtSeconds / duration);
-    const eased = easeInOut(foot.stepPhase);
-
-    const from = foot.plantedAt;
-    const to = foot.landingAt;
-    foot.position = {
-      x: from.x + (to.x - from.x) * eased,
-      y: from.y + (to.y - from.y) * eased,
-    };
-    foot.lift = Math.sin(Math.PI * foot.stepPhase) * this.options.liftHeight;
-
-    if (foot.stepPhase >= 1) {
-      foot.stepping = false;
-      foot.plantedAt = { ...to };
-      foot.position = { ...to };
-      foot.landingAt = null;
-      foot.lift = 0;
-    }
+    this.feet.forEach((foot, index) => {
+      foot.phase += dt / cycle;
+      if (foot.phase >= 1) {
+        foot.phase -= Math.floor(foot.phase);
+        this.liftOff(foot, targets[index]!, transform);
+      }
+      if (!foot.stepping) return;
+      if (foot.phase >= duty) this.plant(foot);
+      else this.raise(foot, duty);
+    });
   }
 
   /** All feet snap back to their resting positions; used when the creature stops. */
   plantAll(transform: BodyTransform): void {
-    for (const foot of this.feet) {
+    this.lastHeading = transform.heading;
+    this.feet.forEach((foot, index) => {
       const planted = toWorld(foot.limb.restTarget, transform.origin, transform.heading);
       foot.stepping = false;
-      foot.stepPhase = 1;
       foot.lift = 0;
       foot.position = { ...planted };
       foot.plantedAt = { ...planted };
       foot.landingAt = null;
-    }
+      foot.phase = this.restPhase(index);
+    });
   }
 
-  /** Fraction of feet currently airborne (0..1); drives the body bob. */
+  /** Fraction of feet currently airborne (0..1). */
   get airFraction(): number {
     if (this.feet.length === 0) return 0;
     let lifting = 0;
@@ -173,27 +158,128 @@ export class GaitController {
     return lifting / this.feet.length;
   }
 
-  /**
-   * Where each foot would rest if it planted right now.
-   *
-   * Moving feet lead slightly ahead of the body, so the creature does not look
-   * like it is reaching backwards.
-   */
-  private desiredTargets(
-    transform: BodyTransform,
-    velocity: Point,
-    speed: number,
-  ): Map<Foot, Point> {
-    const leadSeconds = Math.min(0.18, this.rig.stride / Math.max(1, speed));
-    const map = new Map<Foot, Point>();
-
-    for (const foot of this.feet) {
-      const resting = toWorld(foot.limb.restTarget, transform.origin, transform.heading);
-      map.set(foot, {
-        x: resting.x + velocity.x * leadSeconds,
-        y: resting.y + velocity.y * leadSeconds,
-      });
-    }
-    return map;
+  private liftOff(foot: Foot, target: Point, transform: BodyTransform): void {
+    // A step that never landed is replaced, not stacked on top of: the foot is
+    // already standing where the previous step was taking it.
+    if (foot.landingAt !== null) this.plant(foot);
+    foot.stepping = true;
+    foot.plantedAt = { ...foot.position };
+    foot.landingAt = this.withinReach(target, foot.limb, transform);
   }
+
+  /**
+   * Keep a landing point inside the leg's reach.
+   *
+   * The rest stance already spends most of the chain, so a projected landing point
+   * can ask for more than the bones have, and FABRIK would answer by straightening
+   * the leg. The target is moved fully back onto the reach limit, not just nudged:
+   * a partly corrected target still leaves a straight leg on the next frame.
+   */
+  private withinReach(target: Point, limb: LimbRig, transform: BodyTransform): Point {
+    const base = toWorld(limb.base, transform.origin, transform.heading);
+    const limit = this.rig.reach * CREATURE_CONFIG.stepMaxReachFraction;
+    const dx = target.x - base.x;
+    const dy = target.y - base.y;
+    const distance = Math.hypot(dx, dy);
+    if (distance <= limit || distance < 1e-6) return target;
+
+    return {
+      x: base.x + (dx / distance) * limit,
+      y: base.y + (dy / distance) * limit,
+    };
+  }
+
+  private raise(foot: Foot, duty: number): void {
+    if (foot.landingAt === null) return;
+    const t = Math.min(1, foot.phase / duty);
+    const eased = easeInOut(t);
+    foot.position = {
+      x: foot.plantedAt.x + (foot.landingAt.x - foot.plantedAt.x) * eased,
+      y: foot.plantedAt.y + (foot.landingAt.y - foot.plantedAt.y) * eased,
+    };
+    foot.lift = Math.sin(Math.PI * t) * this.options.liftHeight;
+  }
+
+  private plant(foot: Foot): void {
+    if (foot.landingAt !== null) {
+      foot.position = { ...foot.landingAt };
+      foot.plantedAt = { ...foot.landingAt };
+      foot.landingAt = null;
+    }
+    foot.stepping = false;
+    foot.lift = 0;
+  }
+
+  /** A planted phase at the start of the foot's stance, just before its slot. */
+  private restPhase(index: number): number {
+    return (1 - this.offsets[index]!) % 1;
+  }
+
+  /**
+   * Airborne share of the cycle.
+   *
+   * A step should last the species' step duration when the cycle allows it, but it
+   * must also survive the frame rate: a window shorter than a frame would lift and
+   * plant a foot between two renders, so the foot would appear to teleport. The
+   * cap keeps a majority of the legs down, which is what makes the gait read as a
+   * crawl instead of a shimmer.
+   */
+  private dutyFor(cycle: number, dt: number): number {
+    const wanted = Math.max(this.options.stepDurationMs / 1000, dt * 2) / cycle;
+    return Math.min(CREATURE_CONFIG.stepDutyCycle, wanted);
+  }
+
+  /** Keep a cycle long enough for the swing to be visible across several frames. */
+  private cycleFor(naturalCycle: number): number {
+    return Math.max(CREATURE_CONFIG.minCycleSeconds, naturalCycle);
+  }
+
+  /**
+   * Landing point per foot: its rest target on the body as it will be when the
+   * foot lands. The body travels for the whole airborne window before that, so the
+   * projection covers the airborne time and lands a drag-half ahead of the stance
+   * the foot lifts from.
+   */
+  private landingTargets(
+    transform: BodyTransform,
+    speed: number,
+    turnRate: number,
+    cycle: number,
+    duty: number,
+  ): Point[] {
+    const seconds = cycle * duty;
+
+    const projected: BodyTransform = {
+      origin: {
+        x: transform.origin.x + Math.cos(transform.heading) * speed * seconds,
+        y: transform.origin.y + Math.sin(transform.heading) * speed * seconds,
+      },
+      heading: transform.heading + turnRate * seconds,
+    };
+
+    return this.feet.map((foot) =>
+      toWorld(foot.limb.restTarget, projected.origin, projected.heading),
+    );
+  }
+}
+
+/**
+ * Liftoff phase of each foot, spread evenly over the cycle.
+ *
+ * One side ripples from rear to front, and the other side runs the same ripple
+ * half a cycle later. The two sides of a band then lift half a cycle apart, so a
+ * band is never unsupported on both sides at once, and the crest of the wave
+ * visibly travels frontwards along each side — which is how a real spider walks.
+ * Neighbouring legs on the same side overlap, as they do on a spider; they are a
+ * stride apart on the ground, so they never share a patch of it.
+ */
+function waveOffsets(limbs: readonly LimbRig[]): number[] {
+  const rear = limbs.reduce((max, limb) => Math.max(max, limb.band), 0);
+  const bands = Math.max(1, Math.round(limbs.length / 2));
+  const slots = bands * 2;
+  return limbs.map((limb) => {
+    const along = rear - limb.band;
+    const slot = limb.side === -1 ? along : along + bands;
+    return (slot % slots) / slots;
+  });
 }

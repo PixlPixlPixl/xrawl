@@ -10,6 +10,7 @@
  * translates them into document space each tick.
  */
 import type { CreatureAppearance } from '@/shared/types/creature';
+import { CREATURE_CONFIG } from '@/shared/constants/creature';
 import type { Point } from './fabrik';
 
 export interface LimbRig {
@@ -17,8 +18,6 @@ export interface LimbRig {
   readonly side: -1 | 1;
   /** Band position from front (0) to back. */
   readonly band: number;
-  /** Alternating stepping group. Parity is enough for a tetrapod gait. */
-  readonly group: 0 | 1;
   /** Body-local attachment point. */
   readonly base: Point;
   readonly boneLengths: readonly number[];
@@ -66,12 +65,15 @@ export function buildRig(
     const t = bandCount === 1 ? 0.5 : pair / (bandCount - 1);
     const baseX = halfWidth * (0.8 - t * 1.6);
 
-    // Front bands splay forward, back bands backward; the middle is near-out.
-    const splay = bandCount === 1 ? 0 : (0.5 - t) * 2;
+    // Front bands splay forward, rear bands backward; the middle is near-out.
+    // The direction matters: sweeping the *front* pair backwards folds every
+    // foot toward the body centre, so front and rear legs cross and several
+    // feet compete for the same ground. Positive sweep must open the fan.
+    const sweep = bandCount === 1 ? 0 : (0.5 - t) * 2;
+    const restDistance = reach * CREATURE_CONFIG.restStanceFraction;
 
     for (const side of [-1, 1] as const) {
-      const angle = side === 1 ? Math.PI / 2 + splay * 0.55 : -Math.PI / 2 - splay * 0.55;
-      const restDistance = reach * 0.76;
+      const angle = side * (Math.PI / 2 - sweep * CREATURE_CONFIG.legSplay);
       const restTarget: Point = {
         x: baseX + Math.cos(angle) * restDistance,
         y: side * halfHeight + Math.sin(angle) * restDistance,
@@ -81,9 +83,6 @@ export function buildRig(
         index: limbList.length,
         side,
         band: pair,
-        // Alternating bands step in opposite groups: a tetrapod gait without
-        // any per-species table.
-        group: (pair % 2) as 0 | 1,
         base: { x: baseX, y: side * halfHeight * 0.92 },
         boneLengths: limbs.segmentLengths,
         restTarget,

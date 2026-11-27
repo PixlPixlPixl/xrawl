@@ -124,9 +124,15 @@ export function solveFabrik(
  *
  * A perfectly straight seed is an unstable fixed point: with every joint
  * collinear, FABRIK's forward and backward passes pull along the same line and
- * never produce rotation, so a reachable-but-folded target can stall at a
- * straight-but-wrong pose. Seeding with a gentle curve gives the solver a
- * moment arm to work with.
+ * never produce rotation, so a reachable-but-folded target stalls at a
+ * straight-but-wrong pose. Short chains are the worst case — a two-bone leg has
+ * one joint, and a nearly straight seed leaves it almost no moment arm, so the
+ * solver needs dozens of iterations to fold a knee that a better seed folds in
+ * a handful.
+ *
+ * So the seed is a spiral: every bone turns by the same angle, chosen so the
+ * resulting chain spans the root-to-target chord. That is already close to the
+ * answer for most targets, which keeps the drawn limb bent on every frame.
  *
  * Bone lengths are exact in the seed; only the final foot position is
  * approximate, and the solver corrects it.
@@ -140,29 +146,72 @@ export function seedChain(
   const boneCount = boneLengths.length;
   if (boneCount < 1) return [{ ...root }];
 
-  const reach = chainLength(boneLengths);
   const dx = target.x - root.x;
   const dy = target.y - root.y;
   const chord = Math.hypot(dx, dy);
   const chordAngle = chord > 1e-6 ? Math.atan2(dy, dx) : 0;
-
-  // More slack means the chain must fold more, so curve it more.
-  const slackRatio = reach > 0 ? Math.max(0, 1 - chord / reach) : 0;
-  const bend = (0.22 + slackRatio * 0.55) * (options.bendSign ?? 1);
+  const bendSign = options.bendSign ?? 1;
+  const turn = turnForChord(boneLengths, chord) * bendSign;
 
   const joints: Point[] = [{ ...root }];
   let x = root.x;
   let y = root.y;
   for (let index = 0; index < boneCount; index += 1) {
-    // Rotate progressively so the chain keeps bending instead of kinking.
-    const t = boneCount === 1 ? 1 : index / (boneCount - 1);
-    const angle = chordAngle + bend * t;
+    // Each bone turns a little more than the one before, so the chain spirals
+    // instead of kinking at a single joint.
+    const angle = chordAngle + turn * ((index + 1) / boneCount);
     x += Math.cos(angle) * boneLengths[index]!;
     y += Math.sin(angle) * boneLengths[index]!;
     joints.push({ x, y });
   }
   return joints;
 }
+
+/**
+ * Total turn, in radians, that makes a spiralled chain span `chord`.
+ *
+ * The span shrinks as the turn grows, so the first crossing is the smallest fold
+ * that reaches the target; bisecting inside the bracket finds it to a fraction of
+ * a degree. When the chord cannot be spanned even straight, a small turn is
+ * returned — enough to break the collinear fixed point.
+ */
+function turnForChord(boneLengths: readonly number[], chord: number): number {
+  const boneCount = boneLengths.length;
+  const span = (turn: number): number => {
+    let x = 0;
+    let y = 0;
+    for (let index = 0; index < boneCount; index += 1) {
+      const angle = turn * ((index + 1) / boneCount);
+      x += Math.cos(angle) * boneLengths[index]!;
+      y += Math.sin(angle) * boneLengths[index]!;
+    }
+    return Math.hypot(x, y);
+  };
+
+  const samples = 24;
+  if (span(0) <= chord) return MIN_SEED_TURN;
+
+  let previousTurn = 0;
+  for (let step = 1; step <= samples; step += 1) {
+    const turn = (step / samples) * Math.PI;
+    if (span(turn) <= chord) {
+      let low = previousTurn;
+      let high = turn;
+      for (let refine = 0; refine < 18; refine += 1) {
+        const mid = (low + high) / 2;
+        if (span(mid) > chord) low = mid;
+        else high = mid;
+      }
+      return (low + high) / 2;
+    }
+    previousTurn = turn;
+  }
+
+  return Math.max(MIN_SEED_TURN, previousTurn);
+}
+
+/** Smallest fold used when no turn can close the chord. */
+const MIN_SEED_TURN = 0.35;
 
 function straightChain(root: Point, boneLengths: readonly number[], target: Point): Point[] {
   const chain: Point[] = [{ x: root.x, y: root.y }];
